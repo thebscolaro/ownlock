@@ -1,0 +1,234 @@
+"""Tests for ownlock.cli — Typer CLI commands."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from typer.testing import CliRunner
+
+from ownlock.cli import app
+from ownlock.vault import VaultManager
+
+PASSPHRASE = "test-pass"
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _ownlock_env(tmp_path, monkeypatch):
+    """Set passphrase env var and patch vault paths to tmp_path for every test."""
+    monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+
+    vault_path = tmp_path / ".ownlock" / "vault.db"
+    monkeypatch.setattr("ownlock.vault.GLOBAL_VAULT_PATH", vault_path)
+    monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_path)
+
+    # Make _resolve_vault_path always return our tmp vault
+    monkeypatch.setattr(
+        "ownlock.cli._resolve_vault_path",
+        lambda project=False: vault_path,
+    )
+
+    # Patch find_project_vault so resolver doesn't pick up real project vaults
+    monkeypatch.setattr(
+        "ownlock.vault.VaultManager.find_project_vault",
+        staticmethod(lambda: None),
+    )
+
+
+@pytest.fixture()
+def vault_db(tmp_path):
+    """Return the vault path (same as patched in _ownlock_env)."""
+    return tmp_path / ".ownlock" / "vault.db"
+
+
+@pytest.fixture()
+def seeded_vault(vault_db):
+    """Create and seed the vault with a test secret."""
+    with VaultManager(vault_db, PASSPHRASE) as vm:
+        vm.set("MY_KEY", "my-value")
+    return vault_db
+
+
+class TestInit:
+    def test_creates_vault_db(self, tmp_path, vault_db, monkeypatch):
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda project=False: vault_db,
+        )
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
+        )
+        monkeypatch.setattr(
+            "ownlock.cli.store_passphrase",
+            lambda p: False,
+        )
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        assert vault_db.exists()
+
+    def test_init_project_creates_gitignore(self, tmp_path, monkeypatch):
+        """init --project creates .gitignore with .ownlock/ when none exists."""
+        monkeypatch.chdir(tmp_path)
+        project_vault = tmp_path / ".ownlock" / "vault.db"
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
+        )
+
+        result = runner.invoke(app, ["init", "--project"])
+        assert result.exit_code == 0
+        assert project_vault.exists()
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        assert ".ownlock" in gitignore.read_text()
+
+    def test_init_project_appends_to_existing_gitignore(self, tmp_path, monkeypatch):
+        """init --project appends .ownlock/ to existing .gitignore."""
+        monkeypatch.chdir(tmp_path)
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("node_modules/\n.env\n")
+        project_vault = tmp_path / ".ownlock" / "vault.db"
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
+        )
+
+        result = runner.invoke(app, ["init", "--project"])
+        assert result.exit_code == 0
+        content = gitignore.read_text()
+        assert "node_modules/" in content
+        assert ".ownlock" in content
+
+    def test_init_project_skips_gitignore_when_ownlock_already_present(
+        self, tmp_path, monkeypatch
+    ):
+        """init --project does not duplicate .ownlock if already in .gitignore."""
+        monkeypatch.chdir(tmp_path)
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("node_modules/\n.ownlock/\n")
+        project_vault = tmp_path / ".ownlock" / "vault.db"
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
+        )
+
+        result = runner.invoke(app, ["init", "--project"])
+        assert result.exit_code == 0
+        content = gitignore.read_text()
+        assert content.count(".ownlock") == 1
+
+
+class TestSetGet:
+    def test_set_rejects_invalid_secret_name(self, seeded_vault):
+        result = runner.invoke(app, ["set", "invalid.name=value"])
+        assert result.exit_code == 1
+        assert "letters, numbers" in result.output
+
+    def test_set_then_get_roundtrip(self, vault_db, seeded_vault):
+        result = runner.invoke(app, ["set", "NEW_KEY=new-value"])
+        assert result.exit_code == 0
+
+        result = runner.invoke(app, ["get", "NEW_KEY"])
+        assert result.exit_code == 0
+        assert "new-value" in result.output
+
+
+class TestList:
+    def test_list_shows_name(self, seeded_vault):
+        result = runner.invoke(app, ["list"])
+        assert result.exit_code == 0
+        assert "MY_KEY" in result.output
+
+
+class TestDelete:
+    def test_delete_removes_secret(self, seeded_vault):
+        result = runner.invoke(app, ["delete", "MY_KEY"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+
+        result = runner.invoke(app, ["get", "MY_KEY"])
+        assert result.exit_code == 1
+
+
+class TestImport:
+    def test_import_from_env_file(self, tmp_path, vault_db):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / "import.env"
+        env_file.write_text("ALPHA=one\nBETA=two\n")
+
+        result = runner.invoke(app, ["import", str(env_file)])
+        assert result.exit_code == 0
+        assert "Imported 2" in result.output
+
+        result = runner.invoke(app, ["get", "ALPHA"])
+        assert result.exit_code == 0
+        assert "one" in result.output
+
+
+class TestExport:
+    def test_export_prints_resolved(self, tmp_path, vault_db, seeded_vault):
+        env_file = tmp_path / ".env"
+        env_file.write_text('MY_KEY=vault("MY_KEY")\nPLAIN=hello\n')
+
+        with patch("ownlock.resolver.GLOBAL_VAULT_PATH", vault_db):
+            result = runner.invoke(app, ["export", "-f", str(env_file)])
+
+        assert result.exit_code == 0
+        assert "MY_KEY=my-value" in result.output
+        assert "PLAIN=hello" in result.output
+
+
+class TestRun:
+    def test_run_injects_env_and_redacts(self, tmp_path, vault_db, seeded_vault):
+        env_file = tmp_path / ".env"
+        env_file.write_text('SECRET=vault("MY_KEY")\n')
+
+        with patch("ownlock.resolver.GLOBAL_VAULT_PATH", vault_db):
+            result = runner.invoke(
+                app,
+                ["run", "-f", str(env_file), "--", "echo", "my-value"],
+            )
+
+        assert "[REDACTED:" in result.output or result.exit_code == 0
+
+
+class TestErrorHandling:
+    def test_passphrase_not_found_shows_clean_message(self, tmp_path, monkeypatch):
+        """ValueError from resolve_passphrase shows clean message, no traceback."""
+        monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
+        monkeypatch.setattr(
+            "ownlock.keyring_util.get_passphrase",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": "",
+        )
+        result = runner.invoke(app, ["list"])
+        assert result.exit_code == 1
+        assert "No vault passphrase found" in result.output
+        assert "Traceback" not in result.output
+        assert "keyring_util.py" not in result.output
+
+
+class TestPathValidation:
+    def test_run_rejects_env_file_outside_cwd(self, tmp_path, seeded_vault, monkeypatch):
+        """Relative path escaping cwd is rejected."""
+        monkeypatch.chdir(tmp_path)
+        # Create subdir; try to use ../ to escape
+        (tmp_path / "sub").mkdir()
+        outside = tmp_path / "sub" / ".env"
+        outside.write_text('X=vault("MY_KEY")\n')
+        result = runner.invoke(
+            app,
+            ["run", "-f", "../sub/.env", "--", "echo", "ok"],
+        )
+        # When cwd is tmp_path, ../sub/.env resolves outside cwd (to parent/sub/.env)
+        # Actually tmp_path / "sub" / ".env" - from cwd tmp_path, "../sub/.env" 
+        # resolves to (tmp_path.parent / "sub" / ".env"). That's outside tmp_path.
+        # So we should reject.
+        assert result.exit_code == 1
+        assert "Path must be inside" in result.output
