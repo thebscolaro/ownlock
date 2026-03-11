@@ -9,32 +9,31 @@ No Docker. No server. No account. Just `pip install ownlock`.
 ```bash
 pip install ownlock
 
-# Create a vault (stores passphrase in macOS Keychain)
+# Create a vault (passphrase saved to system keyring)
 ownlock init
 
 # Store secrets
 ownlock set anthropic-api-key
 > Enter value: ****
 
-# Reference secrets in your .env (real values never touch disk)
+# In your .env, use vault() instead of plain values:
 # ANTHROPIC_API_KEY=vault("anthropic-api-key")
 
-# Run any command with secrets injected + stdout redacted
+# Run commands with secrets injected and stdout redacted
 ownlock run -- python app.py
 ```
 
 ## .env format
 
+Plain values pass through unchanged. Secrets stay in the vault and are resolved at runtime:
+
 ```bash
-# Plain values pass through unchanged
+# Non-sensitive config (stored as plain text)
 OLLAMA_BASE_URL=http://localhost:11434
 DEFAULT_WORKER_MODEL=anthropic:claude-opus-4-6
 
-# @sensitive
+# Secrets (resolved from vault at runtime)
 ANTHROPIC_API_KEY=vault("anthropic-api-key")
-
-# Per-environment
-# @sensitive
 OPENAI_API_KEY=vault("openai-api-key", env="production")
 ```
 
@@ -67,10 +66,6 @@ Add `--project` to any command to use the project vault (`.ownlock/vault.db`) in
 
 - **Global vault**: `~/.ownlock/vault.db` — default for all commands
 - **Project vault**: `.ownlock/vault.db` — use `--project` flag
-
-## Part of the Ownly suite
-
-Ownlock is a standalone tool, but it integrates with [Ownly](https://github.com/thebscolaro/ownly) for end-to-end secret management in AI-generated apps.
 
 ## License
 
