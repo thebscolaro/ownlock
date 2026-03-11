@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from typing import IO
 
 
@@ -24,6 +25,16 @@ class SecretRedactor:
             text = text.replace(value, placeholder)
         return text
 
+    def _stream_reader(
+        self,
+        stream: IO[str],
+        dest: IO[str],
+    ) -> None:
+        """Read lines from stream, redact, and write to dest."""
+        for line in stream:
+            dest.write(self.redact(line))
+            dest.flush()
+
     def run_process(
         self,
         cmd: list[str],
@@ -34,7 +45,8 @@ class SecretRedactor:
     ) -> int:
         """Run *cmd* with *env*, streaming redacted stdout/stderr.
 
-        Returns the process exit code.
+        Uses threading for cross-platform compatibility (select() does not
+        work with pipes on Windows).
         """
         merged_env = {**os.environ, **env}
 
@@ -47,27 +59,19 @@ class SecretRedactor:
             bufsize=1,
         )
 
-        import selectors
+        t1 = threading.Thread(
+            target=self._stream_reader,
+            args=(proc.stdout, stdout),
+            daemon=True,
+        )
+        t2 = threading.Thread(
+            target=self._stream_reader,
+            args=(proc.stderr, stderr),
+            daemon=True,
+        )
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
-        sel = selectors.DefaultSelector()
-        if proc.stdout:
-            sel.register(proc.stdout, selectors.EVENT_READ, stdout)
-        if proc.stderr:
-            sel.register(proc.stderr, selectors.EVENT_READ, stderr)
-
-        open_streams = 2
-        while open_streams > 0:
-            for key, _ in sel.select(timeout=0.1):
-                stream: IO[str] = key.fileobj  # type: ignore[assignment]
-                dest: IO[str] = key.data
-                line = stream.readline()
-                if line:
-                    dest.write(self.redact(line))
-                    dest.flush()
-                else:
-                    sel.unregister(stream)
-                    open_streams -= 1
-
-        sel.close()
-        proc.wait()
-        return proc.returncode
+        return proc.wait()
