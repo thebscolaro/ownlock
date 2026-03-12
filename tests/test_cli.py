@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from ownlock.cli import app
+from ownlock.cli import _resolve_vault_path as _real_resolve_vault_path, app
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
@@ -25,7 +25,7 @@ def _ownlock_env(tmp_path, monkeypatch):
     # Make _resolve_vault_path always return our tmp vault
     monkeypatch.setattr(
         "ownlock.cli._resolve_vault_path",
-        lambda project=False: vault_path,
+        lambda global_vault=False, project=False: vault_path,
     )
 
     # Patch find_project_vault so resolver doesn't pick up real project vaults
@@ -54,7 +54,7 @@ class TestInit:
         monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
         monkeypatch.setattr(
             "ownlock.cli._resolve_vault_path",
-            lambda project=False: vault_db,
+            lambda global_vault=False, project=False: vault_db,
         )
         monkeypatch.setattr(
             "ownlock.cli.getpass.getpass",
@@ -212,6 +212,39 @@ class TestErrorHandling:
         assert "No vault passphrase found" in result.output
         assert "Traceback" not in result.output
         assert "keyring_util.py" not in result.output
+
+
+class TestGlobalFlag:
+    def test_global_forces_global_vault_when_in_project(self, tmp_path, vault_db, monkeypatch):
+        """--global forces global vault even when project vault exists."""
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        project_vault = project_dir / ".ownlock" / "vault.db"
+        project_vault.parent.mkdir(parents=True)
+        monkeypatch.chdir(project_dir)
+
+        # Global vault (at tmp_path/.ownlock/vault.db) has the secret
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("GLOBAL_ONLY", "from-global")
+        # Project vault exists but is empty
+        VaultManager.init_vault(project_vault, PASSPHRASE).close()
+
+        # Restore real _resolve_vault_path and make find_project_vault return project vault
+        monkeypatch.setattr("ownlock.cli._resolve_vault_path", _real_resolve_vault_path)
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: project_vault),
+        )
+
+        # Without --global: uses project vault (found in cwd) -> secret not there
+        result = runner.invoke(app, ["get", "GLOBAL_ONLY"])
+        assert result.exit_code == 1
+        assert "not found" in result.output
+
+        # With --global: uses global vault -> secret found
+        result = runner.invoke(app, ["get", "GLOBAL_ONLY", "--global"])
+        assert result.exit_code == 0
+        assert "from-global" in result.output
 
 
 class TestPathValidation:

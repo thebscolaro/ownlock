@@ -42,7 +42,7 @@ OPENAI_API_KEY=vault("openai-api-key", env="production")
 | Command | Description |
 |---|---|
 | `ownlock init` | Create a vault (global or `--project` local) |
-| `ownlock set KEY` | Store a secret in global vault (use `--project` for project vault) |
+| `ownlock set KEY` | Store a secret |
 | `ownlock set KEY=VALUE` | Store inline |
 | `ownlock get KEY` | Print decrypted value |
 | `ownlock list` | Show secret names (never values) |
@@ -52,7 +52,7 @@ OPENAI_API_KEY=vault("openai-api-key", env="production")
 | `ownlock import .env` | Bulk import from plaintext `.env` |
 | `ownlock scan .` | Scan files for leaked secret values |
 
-Add `--project` to any command to use the project vault (`.ownlock/vault.db`) instead of the global vault.
+Default: project vault when in a project directory (`.ownlock/vault.db` in cwd or a parent); otherwise global vault. Use `--global` to force the global vault. Use `--project` to force the project vault at cwd.
 
 ## How it works
 
@@ -64,8 +64,8 @@ Add `--project` to any command to use the project vault (`.ownlock/vault.db`) in
 
 ## Storage
 
-- **Global vault**: `~/.ownlock/vault.db` — default for all commands
-- **Project vault**: `.ownlock/vault.db` — use `--project` flag
+- **Global vault**: `~/.ownlock/vault.db` — use `--global` to force this
+- **Project vault**: `.ownlock/vault.db` — default when in a project directory (cwd or a parent), or use `--project` to force at cwd
 
 ## License
 

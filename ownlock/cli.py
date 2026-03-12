@@ -148,7 +148,8 @@ def init(
 def set_secret(
     key_value: str = typer.Argument(..., help="Secret name, or NAME=VALUE for inline."),
     env: str = typer.Option("default", "--env", "-e", help="Environment (default, production, etc.)."),
-    project: bool = typer.Option(False, "--project", help="Store in project vault."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Store a secret in the vault."""
     if "=" in key_value:
@@ -163,7 +164,7 @@ def set_secret(
     _validate_secret_name(name)
 
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with VaultManager(vault_path, passphrase) as vm:
         vm.set(name, value, env)
@@ -176,11 +177,12 @@ def set_secret(
 def get_secret(
     name: str = typer.Argument(..., help="Secret name."),
     env: str = typer.Option("default", "--env", "-e"),
-    project: bool = typer.Option(False, "--project"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Retrieve and print a decrypted secret."""
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with VaultManager(vault_path, passphrase) as vm:
         value = vm.get(name, env)
@@ -196,11 +198,12 @@ def get_secret(
 @_safe_command
 def list_secrets(
     env: Optional[str] = typer.Option(None, "--env", "-e"),
-    project: bool = typer.Option(False, "--project"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """List stored secret names (never values)."""
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with VaultManager(vault_path, passphrase) as vm:
         secrets = vm.list_secrets(env)
@@ -223,11 +226,12 @@ def list_secrets(
 def delete(
     name: str = typer.Argument(..., help="Secret name."),
     env: str = typer.Option("default", "--env", "-e"),
-    project: bool = typer.Option(False, "--project"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Delete a secret from the vault."""
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with VaultManager(vault_path, passphrase) as vm:
         removed = vm.delete(name, env)
@@ -299,7 +303,8 @@ def export_env(
 def import_env(
     env_file: Path = typer.Argument(..., help="Path to plaintext .env to import."),
     env: str = typer.Option("default", "--env", "-e"),
-    project: bool = typer.Option(False, "--project"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Bulk import secrets from a plaintext .env file."""
     env_file = _validate_env_file(env_file)
@@ -308,7 +313,7 @@ def import_env(
         raise typer.Exit(1)
 
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
     count = 0
 
     with VaultManager(vault_path, passphrase) as vm:
@@ -337,14 +342,15 @@ MAX_SCAN_DEPTH = 20
 def scan(
     directory: Path = typer.Argument(Path("."), help="Directory to scan for leaked secrets."),
     env: str = typer.Option("default", "--env", "-e"),
-    project: bool = typer.Option(False, "--project"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
     max_files: int = typer.Option(MAX_SCAN_FILES, "--max-files", help="Maximum files to scan."),
     max_depth: int = typer.Option(MAX_SCAN_DEPTH, "--max-depth", help="Maximum directory depth."),
 ) -> None:
     """Scan files for leaked secret values."""
     directory = _validate_scan_dir(directory)
     passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(project)
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with VaultManager(vault_path, passphrase) as vm:
         all_secrets = vm.get_all_decrypted(env)
@@ -418,8 +424,13 @@ def _ensure_gitignore() -> None:
     console.print("[dim]Added .ownlock/ to .gitignore[/dim]")
 
 
-def _resolve_vault_path(project: bool) -> Path:
-    """Pick the right vault path. Default is global; --project uses project vault."""
+def _resolve_vault_path(global_vault: bool = False, project: bool = False) -> Path:
+    """Pick vault path. Default: project if found, else global. --global forces global."""
+    if global_vault:
+        return GLOBAL_VAULT_PATH
     if project:
         return Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
+    proj = VaultManager.find_project_vault()
+    if proj:
+        return proj
     return GLOBAL_VAULT_PATH
