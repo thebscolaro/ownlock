@@ -8,11 +8,13 @@ from typing import Optional
 
 from ownlock.vault import VaultManager, GLOBAL_VAULT_PATH
 
+# Pattern: vault("key"[, env="envname"][, project=true|false|global=true|false])
 _VAULT_RE = re.compile(
-    r'^vault\(\s*"([^"]+)"'       # vault("key-name"
-    r'(?:\s*,\s*env\s*=\s*"([^"]+)")?' # optional env="prod"
-    r'(?:\s*,\s*project\s*=\s*(true|false))?' # optional project=true
-    r'\s*\)$'                     # )
+    r'^vault\(\s*"([^"]+)"'  # vault("key-name"
+    r'(?:\s*,\s*env\s*=\s*"([^"]+)")?'  # optional env="prod"
+    r'(?:\s*,\s*(?:project\s*=\s*(true|false)'  # optional project=true/false
+    r'|global\s*=\s*(true|false)))?'  # or global=true/false
+    r'\s*\)$'  # )
 )
 _SECRET_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -60,10 +62,25 @@ def resolve_env_file(
                         f"Invalid secret name '{vault_key}' in vault() reference"
                     )
                 vault_env = match.group(2) or env
-                use_project = match.group(3) == "true"
+                project_flag = match.group(3)  # "true"/"false"/None
+                global_flag = match.group(4)  # "true"/"false"/None
+
+                # Vault selection strategy:
+                # - If global=true: always use global vault.
+                # - Else if a project vault exists and either:
+                #   - project=true, or
+                #   - no explicit global/project flag,
+                #   then use project vault (default: project-first).
+                # - Otherwise, use global vault.
+                if global_flag == "true":
+                    use_project = False
+                elif project_vault_path and (project_flag == "true" or (project_flag is None and global_flag is None)):
+                    use_project = True
+                else:
+                    use_project = False
 
                 value = None
-                if use_project and project_vault_path:
+                if use_project:
                     if project_vm is None:
                         project_vm = VaultManager(project_vault_path, passphrase)
                         project_vm.open()

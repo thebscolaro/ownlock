@@ -35,6 +35,8 @@ def _safe_command(fn: F) -> F:
         except Exception as e:
             from cryptography.exceptions import InvalidTag
 
+            if isinstance(e, typer.Exit):
+                raise  # Preserve intentional exit code (e.g. from run, scan)
             if isinstance(e, InvalidTag):
                 console.print("[red]Invalid passphrase.[/red]")
                 raise typer.Exit(1)
@@ -42,7 +44,8 @@ def _safe_command(fn: F) -> F:
                 msg = str(e.args[0]) if e.args else "Secret not found in vault."
                 console.print(f"[red]{msg}[/red]")
                 raise typer.Exit(1)
-            raise
+            console.print("[red]An error occurred.[/red]")
+            raise typer.Exit(1)
 
     return wrapper  # type: ignore[return-value]
 
@@ -98,6 +101,34 @@ def _is_valid_secret_name(name: str) -> bool:
     return bool(SECRET_NAME_RE.match(name))
 
 
+def _is_tty() -> bool:
+    """Return True if running in an interactive terminal."""
+    try:
+        import sys
+
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _import_env_file_into_vault(env_file: Path, env: str, vm: VaultManager) -> int:
+    """Import KEY=VALUE pairs from env_file into the given vault manager."""
+    count = 0
+    for line in env_file.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key and value and _is_valid_secret_name(key):
+            vm.set(key, value, env)
+            count += 1
+    return count
+
+
 app = typer.Typer(
     name="ownlock",
     help="Lightweight secrets manager — encrypted vault, env injection, stdout redaction.",
@@ -108,13 +139,13 @@ console = Console()
 
 @app.command()
 def init(
-    project: bool = typer.Option(False, "--project", help="Create a project-local vault instead of global."),
+    global_vault: bool = typer.Option(False, "--global", help="Create global vault at ~/.ownlock/ (passphrase in keyring)."),
 ) -> None:
     """Create a new vault."""
-    if project:
-        vault_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
-    else:
+    if global_vault:
         vault_path = GLOBAL_VAULT_PATH
+    else:
+        vault_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
 
     if vault_path.exists():
         console.print(f"[yellow]Vault already exists at {_format_vault_path(vault_path)}[/yellow]")
@@ -132,7 +163,7 @@ def init(
     vm = VaultManager.init_vault(vault_path, passphrase)
     vm.close()
 
-    if not project:
+    if global_vault:
         if store_passphrase(passphrase):
             console.print("[dim]Passphrase saved to system keyring.[/dim]")
         else:
@@ -305,6 +336,7 @@ def import_env(
     env: str = typer.Option("default", "--env", "-e"),
     global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Import without interactive key selection."),
 ) -> None:
     """Bulk import secrets from a plaintext .env file."""
     env_file = _validate_env_file(env_file)
@@ -314,23 +346,327 @@ def import_env(
 
     passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
-    count = 0
 
-    with VaultManager(vault_path, passphrase) as vm:
+    # Interactive key picker in TTY mode (unless --yes)
+    if _is_tty() and not yes:
+        # Preview keys without writing anything yet
+        candidates: list[tuple[str, str]] = []
         for line in env_file.read_text().splitlines():
             stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
-            if "=" not in stripped:
-                continue
-            key, _, value = stripped.partition("=")
+            key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip()
             if key and value and _is_valid_secret_name(key):
-                vm.set(key, value, env)
-                count += 1
+                candidates.append((key, value))
+
+        if not candidates:
+            console.print("[dim]No valid KEY=VALUE entries found to import.[/dim]")
+            return
+
+        console.print(f"Found {len(candidates)} key(s) in {env_file}:")
+        for idx, (key, _val) in enumerate(candidates, start=1):
+            console.print(f"  {idx}. {key}")
+
+        choice = typer.prompt(
+            "Enter indexes to import (comma-separated, 'all' for all, blank = cancel)",
+            default="all",
+        ).strip()
+        if not choice:
+            console.print("[dim]Import cancelled.[/dim]")
+            raise typer.Exit(1)
+
+        selected_indexes: list[int] = []
+        if choice.lower() == "all":
+            selected_indexes = list(range(1, len(candidates) + 1))
+        else:
+            for part in choice.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    idx = int(part)
+                except ValueError:
+                    console.print(f"[red]Invalid selection '{part}'.[/red]")
+                    raise typer.Exit(1)
+                if idx < 1 or idx > len(candidates):
+                    console.print(f"[red]Selection {idx} is out of range.[/red]")
+                    raise typer.Exit(1)
+                selected_indexes.append(idx)
+
+        # Deduplicate while preserving order, map back to keys
+        seen: set[int] = set()
+        selected_keys: list[str] = []
+        for idx in selected_indexes:
+            if idx not in seen:
+                seen.add(idx)
+                key, _ = candidates[idx - 1]
+                selected_keys.append(key)
+
+        with VaultManager(vault_path, passphrase) as vm:
+            count = 0
+            for key, value in candidates:
+                if key in selected_keys:
+                    vm.set(key, value, env)
+                    count += 1
+    else:
+        # Non-interactive or --yes: import all valid keys
+        with VaultManager(vault_path, passphrase) as vm:
+            count = _import_env_file_into_vault(env_file, env, vm)
 
     console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
+
+
+@app.command("auto")
+@_safe_command
+def auto(
+    files: Optional[list[Path]] = typer.Option(
+        None,
+        "-f",
+        "--file",
+        help="Env file(s) to import from.",
+    ),
+    env: str = typer.Option("default", "--env", "-e", help="Vault environment for import and rewrite."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run without interactive prompts."),
+) -> None:
+    """Guided flow: import secrets from env files and rewrite env to use vault()."""
+    is_tty = _is_tty()
+
+    # Determine candidate files
+    if files:
+        candidate_files = [Path(f) for f in files]
+    else:
+        # Common env file names in current directory
+        candidate_files = [Path(".env"), Path(".env.local"), Path(".env.development"), Path(".env.production")]
+
+    valid_files: list[Path] = []
+    for f in candidate_files:
+        f = _validate_env_file(f)
+        if f.exists():
+            valid_files.append(f)
+
+    if not valid_files:
+        console.print("[dim]No env files found. Use --file to specify one or more files.[/dim]")
+        return
+
+    selected_files: list[Path]
+    if files:
+        # Explicit file list: no further selection
+        selected_files = valid_files
+    elif is_tty and not yes:
+        console.print("Found env files:")
+        for idx, f in enumerate(valid_files, start=1):
+            console.print(f"  {idx}. {f}")
+        choice = typer.prompt(
+            "Select file(s) to import from (comma-separated indexes, or blank to cancel)",
+            default="",
+        ).strip()
+        if not choice:
+            console.print("[dim]Import cancelled.[/dim]")
+            raise typer.Exit(1)
+        indexes: list[int] = []
+        for part in choice.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                idx = int(part)
+            except ValueError:
+                console.print(f"[red]Invalid selection '{part}'.[/red]")
+                raise typer.Exit(1)
+            if idx < 1 or idx > len(valid_files):
+                console.print(f"[red]Selection {idx} is out of range.[/red]")
+                raise typer.Exit(1)
+            indexes.append(idx)
+        # Deduplicate while preserving order
+        seen: set[int] = set()
+        selected_files = []
+        for idx in indexes:
+            if idx not in seen:
+                seen.add(idx)
+                selected_files.append(valid_files[idx - 1])
+    else:
+        # Non-interactive or --yes with no explicit files: use all discovered files
+        selected_files = valid_files
+
+    # Preview import counts (TTY, no --yes)
+    total_keys = 0
+    if is_tty and not yes:
+        for f in selected_files:
+            count = 0
+            for line in f.read_text().splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, _, value = stripped.partition("=")
+                key = key.strip()
+                value = value.strip()
+                if key and value and _is_valid_secret_name(key):
+                    count += 1
+            total_keys += count
+        console.print(
+            f"About to import approximately {total_keys} key(s) "
+            f"from {len(selected_files)} file(s) into the {'global' if global_vault else 'project'} vault."
+        )
+        if not typer.confirm("Continue?", default=False):
+            console.print("[dim]Import cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        imported_total = 0
+        for f in selected_files:
+            imported_total += _import_env_file_into_vault(f, env, vm)
+
+    console.print(
+        f"[green]Imported {imported_total} secrets into "
+        f"{'global' if global_vault else 'project'} vault (env={env}).[/green]"
+    )
+
+    # Decide which env file to rewrite: prefer .env if present, otherwise the first selected file
+    rewrite_target = None
+    for f in selected_files:
+        if f.name == ".env":
+            rewrite_target = f
+            break
+    if rewrite_target is None:
+        rewrite_target = selected_files[0]
+
+    if is_tty and not yes:
+        if not typer.confirm(f"Rewrite {rewrite_target} to use vault() references now?", default=False):
+            console.print(
+                "[dim]Rewrite step skipped. You can run "
+                f"'ownlock rewrite-env -f {rewrite_target}' later.[/dim]"
+            )
+            return
+    elif not yes:
+        # Non-interactive without --yes: skip rewrite
+        console.print(
+            "[dim]Non-interactive session; skipping rewrite. "
+            f"Run 'ownlock rewrite-env -f {rewrite_target}' manually.[/dim]"
+        )
+        return
+
+    # Perform rewrite similar to rewrite-env
+    original_text = rewrite_target.read_text()
+    lines = original_text.splitlines()
+
+    with VaultManager(vault_path, passphrase) as vm:
+        existing = vm.get_all_decrypted(env)
+
+    new_lines: list[str] = []
+    changed = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        raw_value = value.strip()
+        if not _is_valid_secret_name(key):
+            new_lines.append(line)
+            continue
+        if raw_value.startswith("vault(\""):
+            new_lines.append(line)
+            continue
+        if key not in existing:
+            new_lines.append(line)
+            continue
+        if env == "default":
+            vault_expr = f'vault(\"{key}\")'
+        else:
+            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
+        new_lines.append(f"{key}={vault_expr}")
+        changed += 1
+
+    if changed == 0:
+        console.print(
+            f"[dim]No changes needed; {rewrite_target} already uses vault() or keys not in vault.[/dim]"
+        )
+        return
+
+    backup_path = rewrite_target.with_suffix(rewrite_target.suffix + ".ownlock.bak")
+    backup_path.write_text(original_text)
+    rewrite_target.write_text("\n".join(new_lines) + "\n")
+    console.print(
+        f"[green]Rewrote {changed} key(s) in {rewrite_target}. Backup saved to {backup_path}.[/green]"
+    )
+
+
+@app.command("rewrite-env")
+@_safe_command
+def rewrite_env(
+    env_file: Path = typer.Option(Path(".env"), "-f", "--file", help="Env file to rewrite."),
+    env: str = typer.Option("default", "--env", "-e", help="Vault environment to target."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Rewrite without confirmation."),
+) -> None:
+    """Rewrite an env file to use vault(\"KEY\") references where possible."""
+    env_file = _validate_env_file(env_file)
+    if not env_file.exists():
+        console.print("[red]Env file not found.[/red]")
+        raise typer.Exit(1)
+
+    original_text = env_file.read_text()
+    lines = original_text.splitlines()
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        existing = vm.get_all_decrypted(env)
+
+    new_lines: list[str] = []
+    changed = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        raw_value = value.strip()
+        if not _is_valid_secret_name(key):
+            new_lines.append(line)
+            continue
+        # Avoid rewriting lines that already use vault()
+        if raw_value.startswith("vault(\""):
+            new_lines.append(line)
+            continue
+        if key not in existing:
+            new_lines.append(line)
+            continue
+
+        if env == "default":
+            vault_expr = f'vault(\"{key}\")'
+        else:
+            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
+        new_lines.append(f"{key}={vault_expr}")
+        changed += 1
+
+    if changed == 0:
+        console.print("[dim]No changes needed; env file already uses vault() or keys not in vault.[/dim]")
+        return
+
+    if _is_tty() and not yes:
+        if not typer.confirm(
+            f"Rewrite {env_file} replacing values for {changed} key(s) with vault() references?", default=False
+        ):
+            console.print("[dim]Rewrite cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    backup_path = env_file.with_suffix(env_file.suffix + ".ownlock.bak")
+    backup_path.write_text(original_text)
+    env_file.write_text("\n".join(new_lines) + "\n")
+    console.print(f"[green]Rewrote {changed} key(s) in {env_file}. Backup saved to {backup_path}.[/green]")
 
 
 MAX_SCAN_FILES = 10_000
@@ -346,9 +682,19 @@ def scan(
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
     max_files: int = typer.Option(MAX_SCAN_FILES, "--max-files", help="Maximum files to scan."),
     max_depth: int = typer.Option(MAX_SCAN_DEPTH, "--max-depth", help="Maximum directory depth."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run without interactive confirmation prompts."),
 ) -> None:
     """Scan files for leaked secret values."""
     directory = _validate_scan_dir(directory)
+
+    if _is_tty() and not yes:
+        # Guard against extremely broad scans (root or very high max_files)
+        if directory == Path("/") or max_files >= MAX_SCAN_FILES:
+            if not typer.confirm(
+                f"You're about to scan up to {max_files} files under {directory}. Continue?", default=False
+            ):
+                console.print("[dim]Scan cancelled.[/dim]")
+                raise typer.Exit(1)
     passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 

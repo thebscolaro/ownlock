@@ -52,14 +52,38 @@ class TestPlainEnv:
 
 
 class TestVaultReference:
-    def test_vault_ref_resolved(self, tmp_path, global_vault):
+    def test_vault_ref_uses_project_when_available(self, tmp_path, project_vault, global_vault):
+        # Same key in both vaults; project should win when both exist.
+        proj_vm, proj_db = project_vault
+        proj_vm.set("DB_PASS", "proj-secret")
+
+        glob_vm, _ = global_vault
+        glob_vm.set("DB_PASS", "global-secret")
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=proj_db,
+        ):
+            env_file = tmp_path / ".env"
+            env_file.write_text('DATABASE_URL=vault("DB_PASS")\n')
+            resolved, secret_names = resolve_env_file(env_file, PASSPHRASE)
+            assert resolved["DATABASE_URL"] == "proj-secret"
+            assert "DATABASE_URL" in secret_names
+
+    def test_vault_ref_uses_global_when_no_project_vault(self, tmp_path, global_vault):
         vm, _ = global_vault
-        vm.set("DB_PASS", "s3cr3t")
+        vm.set("DB_PASS", "global-only")
 
         env_file = tmp_path / ".env"
         env_file.write_text('DATABASE_URL=vault("DB_PASS")\n')
-        resolved, secret_names = resolve_env_file(env_file, PASSPHRASE)
-        assert resolved["DATABASE_URL"] == "s3cr3t"
+
+        # Explicitly ensure no project vault is found
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=None,
+        ):
+            resolved, secret_names = resolve_env_file(env_file, PASSPHRASE)
+        assert resolved["DATABASE_URL"] == "global-only"
         assert "DATABASE_URL" in secret_names
 
     def test_vault_ref_with_env(self, tmp_path, global_vault):
@@ -68,12 +92,20 @@ class TestVaultReference:
 
         env_file = tmp_path / ".env"
         env_file.write_text('API_KEY=vault("API_KEY", env="prod")\n')
-        resolved, _ = resolve_env_file(env_file, PASSPHRASE)
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=None,
+        ):
+            resolved, _ = resolve_env_file(env_file, PASSPHRASE)
         assert resolved["API_KEY"] == "prod-key"
 
-    def test_vault_ref_project(self, tmp_path, project_vault, global_vault):
-        vm, proj_db = project_vault
-        vm.set("PROJ_SECRET", "proj-val")
+    def test_vault_ref_project_true_explicit(self, tmp_path, project_vault, global_vault):
+        proj_vm, proj_db = project_vault
+        proj_vm.set("PROJ_SECRET", "proj-val")
+
+        glob_vm, _ = global_vault
+        glob_vm.set("PROJ_SECRET", "global-val")
 
         with patch(
             "ownlock.resolver.VaultManager.find_project_vault",
@@ -83,6 +115,23 @@ class TestVaultReference:
             env_file.write_text('SECRET=vault("PROJ_SECRET", project=true)\n')
             resolved, secret_names = resolve_env_file(env_file, PASSPHRASE)
             assert resolved["SECRET"] == "proj-val"
+            assert "SECRET" in secret_names
+
+    def test_vault_ref_global_true_forces_global(self, tmp_path, project_vault, global_vault):
+        proj_vm, proj_db = project_vault
+        proj_vm.set("PROJ_SECRET", "proj-val")
+
+        glob_vm, _ = global_vault
+        glob_vm.set("PROJ_SECRET", "global-val")
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=proj_db,
+        ):
+            env_file = tmp_path / ".env"
+            env_file.write_text('SECRET=vault("PROJ_SECRET", global=true)\n')
+            resolved, secret_names = resolve_env_file(env_file, PASSPHRASE)
+            assert resolved["SECRET"] == "global-val"
             assert "SECRET" in secret_names
 
     def test_invalid_vault_key_raises_keyerror(self, tmp_path, global_vault):
@@ -107,7 +156,12 @@ class TestSecretNames:
 
         env_file = tmp_path / ".env"
         env_file.write_text('PLAIN=hello\nSECRET=vault("SEC")\n')
-        _, secret_names = resolve_env_file(env_file, PASSPHRASE)
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=None,
+        ):
+            _, secret_names = resolve_env_file(env_file, PASSPHRASE)
         assert secret_names == ["SECRET"]
 
     def test_inline_values_not_in_secret_names(self, tmp_path, global_vault):

@@ -50,12 +50,23 @@ def seeded_vault(vault_db):
 
 
 class TestInit:
-    def test_creates_vault_db(self, tmp_path, vault_db, monkeypatch):
-        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
+    def test_creates_vault_db(self, tmp_path, monkeypatch):
+        """ownlock init creates project vault at cwd/.ownlock/vault.db."""
+        monkeypatch.chdir(tmp_path)
+        project_vault = tmp_path / ".ownlock" / "vault.db"
         monkeypatch.setattr(
-            "ownlock.cli._resolve_vault_path",
-            lambda global_vault=False, project=False: vault_db,
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
         )
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        assert project_vault.exists()
+
+    def test_init_global_creates_global_vault(self, tmp_path, monkeypatch):
+        """ownlock init --global creates vault at GLOBAL_VAULT_PATH."""
+        global_path = tmp_path / "global" / "vault.db"
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
         monkeypatch.setattr(
             "ownlock.cli.getpass.getpass",
             lambda prompt="": PASSPHRASE,
@@ -65,12 +76,12 @@ class TestInit:
             lambda p: False,
         )
 
-        result = runner.invoke(app, ["init"])
+        result = runner.invoke(app, ["init", "--global"])
         assert result.exit_code == 0
-        assert vault_db.exists()
+        assert global_path.exists()
 
-    def test_init_project_creates_gitignore(self, tmp_path, monkeypatch):
-        """init --project creates .gitignore with .ownlock/ when none exists."""
+    def test_init_creates_gitignore(self, tmp_path, monkeypatch):
+        """ownlock init creates .gitignore with .ownlock/ when none exists."""
         monkeypatch.chdir(tmp_path)
         project_vault = tmp_path / ".ownlock" / "vault.db"
         monkeypatch.setattr(
@@ -78,15 +89,15 @@ class TestInit:
             lambda prompt="": PASSPHRASE,
         )
 
-        result = runner.invoke(app, ["init", "--project"])
+        result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         assert project_vault.exists()
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
         assert ".ownlock" in gitignore.read_text()
 
-    def test_init_project_appends_to_existing_gitignore(self, tmp_path, monkeypatch):
-        """init --project appends .ownlock/ to existing .gitignore."""
+    def test_init_appends_to_existing_gitignore(self, tmp_path, monkeypatch):
+        """ownlock init appends .ownlock/ to existing .gitignore."""
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.env\n")
@@ -96,16 +107,16 @@ class TestInit:
             lambda prompt="": PASSPHRASE,
         )
 
-        result = runner.invoke(app, ["init", "--project"])
+        result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         content = gitignore.read_text()
         assert "node_modules/" in content
         assert ".ownlock" in content
 
-    def test_init_project_skips_gitignore_when_ownlock_already_present(
+    def test_init_skips_gitignore_when_ownlock_already_present(
         self, tmp_path, monkeypatch
     ):
-        """init --project does not duplicate .ownlock if already in .gitignore."""
+        """ownlock init does not duplicate .ownlock if already in .gitignore."""
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.ownlock/\n")
@@ -115,7 +126,7 @@ class TestInit:
             lambda prompt="": PASSPHRASE,
         )
 
-        result = runner.invoke(app, ["init", "--project"])
+        result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         content = gitignore.read_text()
         assert content.count(".ownlock") == 1
@@ -166,6 +177,113 @@ class TestImport:
         result = runner.invoke(app, ["get", "ALPHA"])
         assert result.exit_code == 0
         assert "one" in result.output
+
+    def test_import_skips_invalid_keys_and_comments(self, tmp_path, vault_db):
+        """Import skips comments, blank lines, and invalid key names."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / "import.env"
+        env_file.write_text(
+            "# comment\n"
+            "\n"
+            "invalid.name=skip\n"
+            "VALID_KEY=imported\n"
+            "  SPACED=ok  \n"
+            "another.bad=no\n"
+        )
+
+        result = runner.invoke(app, ["import", str(env_file)])
+        assert result.exit_code == 0
+        assert "Imported 2" in result.output  # VALID_KEY and SPACED only
+
+        result = runner.invoke(app, ["get", "VALID_KEY"])
+        assert result.exit_code == 0
+        assert "imported" in result.output
+        result = runner.invoke(app, ["get", "SPACED"])
+        assert result.exit_code == 0
+        assert "ok" in result.output
+        result = runner.invoke(app, ["get", "invalid.name"])
+        assert result.exit_code == 1
+
+    def test_import_with_global_uses_global_vault(self, tmp_path, vault_db):
+        """Import with --global stores in global vault; get --global retrieves."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / "import.env"
+        env_file.write_text("GLOBAL_ONLY=from-import\n")
+
+        result = runner.invoke(app, ["import", str(env_file), "--global"])
+        assert result.exit_code == 0
+        assert "Imported 1" in result.output
+
+        result = runner.invoke(app, ["get", "GLOBAL_ONLY", "--global"])
+        assert result.exit_code == 0
+        assert "from-import" in result.output
+
+
+class TestScan:
+    def test_scan_finds_leaked_secret(self, tmp_path, seeded_vault):
+        """Scan reports file containing a vault secret value; output uses secret name only."""
+        leak_file = tmp_path / "config.txt"
+        leak_file.write_text("connection_string=my-value\n")  # my-value is MY_KEY in seeded_vault
+
+        result = runner.invoke(app, ["scan", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "leaked" in result.output.lower()
+        assert "MY_KEY" in result.output
+        assert "my-value" not in result.output  # value must not be printed
+
+    def test_scan_no_leak_reports_clean(self, tmp_path, seeded_vault):
+        """Scan with no leaked values exits 0 and reports clean."""
+        safe_file = tmp_path / "readme.txt"
+        safe_file.write_text("No secrets here\n")
+
+        result = runner.invoke(app, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No leaked secrets found" in result.output
+
+
+class TestRewriteEnv:
+    def test_rewrite_env_replaces_values_with_vault_calls(self, tmp_path, vault_db):
+        """rewrite-env rewrites keys present in the vault and creates a backup."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text("FOO=one\nBAR=two\n# comment\n")
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("FOO", "one")
+
+        result = runner.invoke(app, ["rewrite-env", "-f", str(env_file), "--yes"])
+        assert result.exit_code == 0
+
+        text = env_file.read_text()
+        assert 'FOO=vault("FOO")' in text
+        assert "BAR=two" in text  # unchanged
+        backup = tmp_path / ".env.ownlock.bak"
+        assert backup.exists()
+
+
+class TestAuto:
+    def test_auto_imports_and_rewrites_env_with_yes(self, tmp_path, vault_db, monkeypatch):
+        """auto -f .env --yes imports and rewrites .env without prompts."""
+        # Prepare plaintext env
+        env_file = tmp_path / ".env"
+        env_file.write_text("AUTO_KEY=auto-value\n")
+
+        # Ensure GLOBAL_VAULT_PATH points at our tmp vault and resolve_vault_path uses it
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: vault_db,
+        )
+
+        result = runner.invoke(app, ["auto", "-f", str(env_file), "--yes"])
+        assert result.exit_code == 0
+
+        # Key should be in the vault and .env rewritten to use vault()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("AUTO_KEY") == "auto-value"
+        text = env_file.read_text()
+        assert 'AUTO_KEY=vault("AUTO_KEY")' in text
 
 
 class TestExport:
