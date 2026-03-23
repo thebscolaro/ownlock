@@ -142,36 +142,74 @@ def init(
     global_vault: bool = typer.Option(False, "--global", help="Create global vault at ~/.ownlock/ (passphrase in keyring)."),
 ) -> None:
     """Create a new vault."""
-    if global_vault:
-        vault_path = GLOBAL_VAULT_PATH
-    else:
-        vault_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
-
-    if vault_path.exists():
-        console.print(f"[yellow]Vault already exists at {_format_vault_path(vault_path)}[/yellow]")
-        raise typer.Exit(0)
-
-    passphrase = getpass.getpass("Choose a vault passphrase: ")
-    if not passphrase:
-        console.print("[red]Passphrase cannot be empty.[/red]")
-        raise typer.Exit(1)
-    confirm = getpass.getpass("Confirm passphrase: ")
-    if passphrase != confirm:
-        console.print("[red]Passphrases do not match.[/red]")
-        raise typer.Exit(1)
-
-    vm = VaultManager.init_vault(vault_path, passphrase)
-    vm.close()
+    project_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
 
     if global_vault:
-        if store_passphrase(passphrase):
+        # Global-only: create global vault and keyring
+        if GLOBAL_VAULT_PATH.exists():
+            console.print(f"[yellow]Vault already exists at {_format_vault_path(GLOBAL_VAULT_PATH)}[/yellow]")
+            raise typer.Exit(0)
+        passphrase = getpass.getpass("Choose a vault passphrase: ")
+        if not passphrase:
+            console.print("[red]Passphrase cannot be empty.[/red]")
+            raise typer.Exit(1)
+        confirm = getpass.getpass("Confirm passphrase: ")
+        if passphrase != confirm:
+            console.print("[red]Passphrases do not match.[/red]")
+            raise typer.Exit(1)
+        vm = VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase)
+        vm.close()
+        ok, keyring_err = store_passphrase(passphrase)
+        if ok:
             console.print("[dim]Passphrase saved to system keyring.[/dim]")
         else:
-            console.print("[dim]Could not save to keyring. Use OWNLOCK_PASSPHRASE env var.[/dim]")
-    else:
-        _ensure_gitignore()
+            detail = f" ({keyring_err})" if keyring_err else ""
+            console.print(
+                f"[dim]Could not save to keyring{detail}. Use OWNLOCK_PASSPHRASE env var.[/dim]"
+            )
+        console.print(f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]")
+        return
 
-    console.print(f"[green]Vault created at {_format_vault_path(vault_path)}[/green]")
+    # Project vault (keyring-first: ensure global + keyring on first run)
+    if project_path.exists():
+        console.print(f"[yellow]Vault already exists at {_format_vault_path(project_path)}[/yellow]")
+        raise typer.Exit(0)
+
+    if not GLOBAL_VAULT_PATH.exists():
+        # First run: create global vault and keyring, then project vault with same passphrase
+        passphrase = getpass.getpass("Choose a vault passphrase: ")
+        if not passphrase:
+            console.print("[red]Passphrase cannot be empty.[/red]")
+            raise typer.Exit(1)
+        confirm = getpass.getpass("Confirm passphrase: ")
+        if passphrase != confirm:
+            console.print("[red]Passphrases do not match.[/red]")
+            raise typer.Exit(1)
+        vm_global = VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase)
+        vm_global.close()
+        ok, keyring_err = store_passphrase(passphrase)
+        if ok:
+            console.print("[dim]Passphrase saved to system keyring.[/dim]")
+        else:
+            detail = f" ({keyring_err})" if keyring_err else ""
+            console.print(
+                f"[dim]Could not save to keyring{detail}. Use OWNLOCK_PASSPHRASE env var.[/dim]"
+            )
+        vm_proj = VaultManager.init_vault(project_path, passphrase)
+        vm_proj.close()
+        _ensure_gitignore()
+        console.print(
+            f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
+            f"[dim](passphrase in keyring; global vault at {_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
+        )
+        return
+
+    # Global exists: create only project vault using keyring passphrase
+    passphrase = resolve_passphrase()
+    vm = VaultManager.init_vault(project_path, passphrase)
+    vm.close()
+    _ensure_gitignore()
+    console.print(f"[green]Vault created at {_format_vault_path(project_path)}[/green]")
 
 
 @app.command("set")

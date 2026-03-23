@@ -12,7 +12,7 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 ## Security model
 
 - **Encryption**: Secrets are encrypted with AES-256-GCM before storage. Key derivation uses PBKDF2-HMAC-SHA256 with 200,000 iterations.
-- **Passphrase**: Stored in the system keyring (macOS Keychain, GNOME Keyring) when possible. Can also be provided via `OWNLOCK_PASSPHRASE` or interactively.
+- **Passphrase**: Stored in the system keyring when possible (macOS Keychain, Windows Credential Manager, Linux Secret Service backends such as GNOME Keyring). Can also be provided via `OWNLOCK_PASSPHRASE` or interactively.
 - **No network**: ownlock never makes network requests. All data stays local.
 - **Path safety**: Relative paths for `.env` files and scan directories are validated to stay within the current directory.
 - **Subprocess**: `ownlock run` passes the command as a list to the OS exec APIs. No shell interpretation. Secrets are injected as environment variables.

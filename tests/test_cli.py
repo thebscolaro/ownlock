@@ -73,12 +73,13 @@ class TestInit:
         )
         monkeypatch.setattr(
             "ownlock.cli.store_passphrase",
-            lambda p: False,
+            lambda p: (False, "no keyring backend"),
         )
 
         result = runner.invoke(app, ["init", "--global"])
         assert result.exit_code == 0
         assert global_path.exists()
+        assert "no keyring backend" in result.output
 
     def test_init_creates_gitignore(self, tmp_path, monkeypatch):
         """ownlock init creates .gitignore with .ownlock/ when none exists."""
@@ -130,6 +131,47 @@ class TestInit:
         assert result.exit_code == 0
         content = gitignore.read_text()
         assert content.count(".ownlock") == 1
+
+    def test_first_init_creates_global_and_project_vault(self, tmp_path, monkeypatch):
+        """First ownlock init (no global vault yet) creates both global and project vault."""
+        monkeypatch.chdir(tmp_path)
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": PASSPHRASE,
+        )
+        monkeypatch.setattr("ownlock.cli.store_passphrase", lambda p: (True, None))
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        assert global_path.exists()
+        assert (tmp_path / ".ownlock" / "vault.db").exists()
+        assert "passphrase in keyring" in result.output
+        assert "global vault" in result.output
+
+    def test_init_when_global_exists_creates_only_project_vault(
+        self, tmp_path, monkeypatch
+    ):
+        """When global vault exists, ownlock init creates only project vault (uses keyring passphrase)."""
+        monkeypatch.chdir(tmp_path)
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(global_path, PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        getpass_calls = []
+
+        def track_getpass(prompt=""):
+            getpass_calls.append(1)
+            return PASSPHRASE
+
+        monkeypatch.setattr("ownlock.cli.getpass.getpass", track_getpass)
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        assert (tmp_path / ".ownlock" / "vault.db").exists()
+        assert len(getpass_calls) == 0, "should not prompt when global vault exists (passphrase from env/keyring)"
 
 
 class TestSetGet:

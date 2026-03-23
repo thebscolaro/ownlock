@@ -15,17 +15,18 @@ SERVICE_NAME = "ownlock"
 ACCOUNT_NAME = "vault-passphrase"
 
 
-def store_passphrase(passphrase: str) -> bool:
+def store_passphrase(passphrase: str) -> tuple[bool, Optional[str]]:
     """Store the vault passphrase in the system keyring.
 
-    Returns True on success, False if keyring is unavailable.
+    Returns (True, None) on success, or (False, error_message) on failure.
     """
     try:
         import keyring
+
         keyring.set_password(SERVICE_NAME, ACCOUNT_NAME, passphrase)
-        return True
-    except Exception:
-        return False
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def get_passphrase() -> Optional[str]:
