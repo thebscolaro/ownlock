@@ -80,8 +80,9 @@ jobs:
           name: dist
           path: dist/
 
+  # Only publish after build succeeds AND tests/security pass (avoid uploading broken releases).
   publish:
-    needs: build
+    needs: [test, security, build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
