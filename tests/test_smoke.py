@@ -28,7 +28,9 @@ def _subprocess_env(home: Path, passphrase: str = PASS) -> dict[str, str]:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["OWNLOCK_PASSPHRASE"] = passphrase
-    env.setdefault("PYTHONUTF8", "1")
+    # Rich tables use Unicode; Windows defaults (cp1252) break decode and can leave stdout None.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -45,8 +47,15 @@ def _run_cli(
         env=_subprocess_env(home, passphrase),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
+
+
+def _cli_output(proc: subprocess.CompletedProcess[str]) -> str:
+    """Stdout + stderr (Rich may use either; decode-safe on Windows)."""
+    return (proc.stdout or "") + (proc.stderr or "")
 
 
 @pytest.mark.smoke
@@ -60,8 +69,8 @@ def test_smoke_global_vault_get(tmp_path: Path) -> None:
     work = tmp_path / "workdir"
     work.mkdir()
     proc = _run_cli("get", "SMOKE_KEY", "--global", cwd=work, home=home)
-    assert proc.returncode == 0, proc.stderr
-    assert "smoke-value-xyz" in proc.stdout
+    assert proc.returncode == 0, _cli_output(proc)
+    assert "smoke-value-xyz" in _cli_output(proc)
 
 
 @pytest.mark.smoke
@@ -75,8 +84,8 @@ def test_smoke_project_vault_list(tmp_path: Path) -> None:
         vm.set("LISTED", "v", env="default")
 
     proc = _run_cli("list", cwd=project, home=home)
-    assert proc.returncode == 0, proc.stderr
-    assert "LISTED" in proc.stdout
+    assert proc.returncode == 0, _cli_output(proc)
+    assert "LISTED" in _cli_output(proc)
 
 
 @pytest.mark.smoke
@@ -109,7 +118,7 @@ def test_smoke_run_injects_env_without_printing_secret(tmp_path: Path) -> None:
         cwd=project,
         home=home,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.returncode == 0, _cli_output(proc)
 
 
 @pytest.mark.smoke
