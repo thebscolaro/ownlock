@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ownlock"
-version = "0.1.4"
-description = "Lightweight secrets manager — encrypted vault, env injection, stdout redaction. No Docker, no server, no account."
+version = "0.1.5"
+description = "Lightweight secrets manager — encrypted vault, env injection, stdout redaction. Optional MCP (stdio) delegates to CLI. No Docker, no cloud account."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Ownly" }]
-keywords = ["secrets", "vault", "env", "encryption", "cli"]
+keywords = ["secrets", "vault", "env", "encryption", "cli", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -28,12 +28,15 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.2.0"]
+
 [project.scripts]
 ownlock = "ownlock.cli:app"
+ownlock-mcp = "ownlock.mcp_server:main"
 
 [project.urls]
 Repository = "https://github.com/thebscolaro/ownlock"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"

@@ -17,6 +17,7 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **Path safety**: Relative paths for `.env` files and scan directories are validated to stay within the current directory.
 - **Subprocess**: `ownlock run` passes the command as a list to the OS exec APIs. No shell interpretation. Secrets are injected as environment variables.
 - **Redaction**: Known secret values are replaced with `[REDACTED:NAME]` in subprocess stdout/stderr.
+- **MCP** (optional, `ownlock[mcp]`): The stdio MCP server does not load the vault or decrypt in-process. It delegates to the `ownlock` CLI via subprocess; `get` / `export` are not exposed as MCP tools.
 
 ## Known limitations
 

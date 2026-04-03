@@ -2,7 +2,7 @@
 
 Lightweight secrets manager — encrypted local vault, `.env` injection, stdout redaction.
 
-No Docker. No server. No account. Just `pip install ownlock`.
+No Docker. No cloud account. Just `pip install ownlock`.
 
 ---
 
@@ -22,6 +22,45 @@ ownlock set api-key
 # Add to .env: MY_APP_KEY=vault("api-key")
 ownlock run -- python app.py
 ```
+
+---
+
+## MCP (Model Context Protocol)
+
+Optional integration for assistants (e.g. Cursor): the MCP server **does not decrypt the vault in its own process**. It spawns the `ownlock` CLI; passphrase and secrets are handled only in that subprocess.
+
+```bash
+pip install 'ownlock[mcp]'
+```
+
+Run the stdio server (configure your client to launch this command):
+
+```bash
+ownlock-mcp
+```
+
+Tools:
+
+- **`ownlock_run`** — same as `ownlock run -f <file> -e <vault_env> -- <command...>`; returns exit code and captured stdout/stderr (redaction applies in the child as usual).
+- **`ownlock_list_secret_names`** — same as `ownlock list` (names only, never values).
+- **`ownlock_version`** — installed package version.
+
+`get` and `export` are intentionally not exposed via MCP.
+
+**Cursor example** (`.cursor/mcp.json` or global MCP settings):
+
+```json
+{
+  "mcpServers": {
+    "ownlock": {
+      "command": "ownlock-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Use the full path to `ownlock-mcp` if it is not on your `PATH` (e.g. `~/.local/bin/ownlock-mcp` or your venv’s `bin`).
 
 ---
 
