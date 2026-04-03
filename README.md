@@ -196,6 +196,7 @@ Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan
 - **get / export**: Both print secrets to stdout. Use in trusted environments only; prefer `ownlock run` to inject without printing.
 - **Overwrite**: `set` and `import` overwrite existing values for the same key (and env); no append.
 - **File permissions**: Restrict permissions on `~/.ownlock/` and `.ownlock/`. Project init adds `.ownlock/` to `.gitignore`.
+- **Automated checks**: Bandit, pip-audit, security-focused tests, and subprocess smoke tests (`pytest -m smoke`) — see [SECURITY_TESTING.md](SECURITY_TESTING.md).
 
 ---
 

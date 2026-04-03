@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ownlock"
-version = "0.1.5"
+version = "0.1.6"
 description = "Lightweight secrets manager — encrypted vault, env injection, stdout redaction. Optional MCP (stdio) delegates to CLI. No Docker, no cloud account."
 readme = "README.md"
 license = "MIT"
@@ -23,13 +23,18 @@ classifiers = [
 dependencies = [
     "typer>=0.15.0",
     "rich>=13.0",
-    "cryptography>=44.0",
+    "cryptography>=46.0.6",
     "keyring>=25.0",
     "python-dotenv>=1.0",
+    "pygments>=2.20",
 ]
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.2.0"]
+dev = [
+    "bandit[toml]>=1.7.0",
+    "pip-audit>=2.6.0",
+]
 
 [project.scripts]
 ownlock = "ownlock.cli:app"
@@ -40,3 +45,11 @@ Repository = "https://github.com/thebscolaro/ownlock"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "smoke: end-to-end subprocess CLI checks (isolated HOME); run with pytest -m smoke or full suite",
+]
+
+# Subprocess is required for `ownlock run` and MCP delegation; argv lists, no shell.
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "build", "dist"]
+skips = ["B404", "B603"]

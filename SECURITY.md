@@ -19,6 +19,10 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **Redaction**: Known secret values are replaced with `[REDACTED:NAME]` in subprocess stdout/stderr.
 - **MCP** (optional, `ownlock[mcp]`): The stdio MCP server does not load the vault or decrypt in-process. It delegates to the `ownlock` CLI via subprocess; `get` / `export` are not exposed as MCP tools.
 
+## Security testing
+
+Automated checks (Bandit, pip-audit, targeted pytest) and OWASP-oriented mapping are described in [SECURITY_TESTING.md](SECURITY_TESTING.md).
+
 ## Known limitations
 
 - Decrypted secrets exist in process memory while commands run.
