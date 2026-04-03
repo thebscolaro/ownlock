@@ -261,6 +261,37 @@ class TestImport:
         assert "from-import" in result.output
 
 
+class TestDangerousScanRoot:
+    """_is_dangerous_scan_root — filesystem roots only (option c guard)."""
+
+    def test_project_subdirectory_not_dangerous(self, tmp_path):
+        from ownlock.cli import _is_dangerous_scan_root
+
+        d = tmp_path / "proj"
+        d.mkdir()
+        assert _is_dangerous_scan_root(d) is False
+
+    def test_posix_filesystem_root(self):
+        import sys
+
+        from ownlock.cli import _is_dangerous_scan_root
+
+        if sys.platform == "win32":
+            pytest.skip("POSIX root")
+        assert _is_dangerous_scan_root(Path("/")) is True
+
+    def test_windows_drive_root(self):
+        import os
+        import sys
+
+        from ownlock.cli import _is_dangerous_scan_root
+
+        if sys.platform != "win32":
+            pytest.skip("Windows only")
+        drive = Path(os.environ.get("SystemDrive", "C:") + "\\")
+        assert _is_dangerous_scan_root(drive) is True
+
+
 class TestScan:
     def test_scan_finds_leaked_secret(self, tmp_path, seeded_vault):
         """Scan reports file containing a vault secret value; output uses secret name only."""
@@ -281,6 +312,32 @@ class TestScan:
         result = runner.invoke(app, ["scan", str(tmp_path)])
         assert result.exit_code == 0
         assert "No leaked secrets found" in result.output
+
+    def test_scan_tty_default_max_files_no_confirm_prompt(self, tmp_path, seeded_vault, monkeypatch):
+        """Normal project scan should not call typer.confirm (non-noisy OSS UX)."""
+        confirm_calls: list[int] = []
+
+        def track_confirm(*_a, **_k):
+            confirm_calls.append(1)
+            return True
+
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: True)
+        monkeypatch.setattr("typer.confirm", track_confirm)
+        safe_file = tmp_path / "readme.txt"
+        safe_file.write_text("No secrets here\n")
+
+        result = runner.invoke(app, ["scan", str(tmp_path)])
+        assert result.exit_code == 0
+        assert confirm_calls == []
+
+    def test_scan_tty_cancels_when_max_files_exceeds_cap(self, tmp_path, monkeypatch):
+        """Raising --max-files above MAX_SCAN_FILES triggers confirm; declining cancels."""
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: True)
+        monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
+
+        result = runner.invoke(app, ["scan", str(tmp_path), "--max-files", "10001"])
+        assert result.exit_code == 1
+        assert "cancelled" in result.output.lower()
 
 
 class TestRewriteEnv:

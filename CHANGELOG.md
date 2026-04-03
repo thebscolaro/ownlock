@@ -5,6 +5,16 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-04-03
+
+### Changed
+
+- **`scan`**: interactive confirmation prompt only when the scan root is a **filesystem root** (POSIX `/` or Windows drive root) or when `--max-files` is **greater than** the default cap (10_000). Normal project scans no longer prompt every time. Added `_is_dangerous_scan_root()` for cross-platform root detection.
+
+### Fixed
+
+- **Smoke tests (Windows)**: subprocess CLI tests use UTF-8 decoding for Rich table output (already on `main` before this tag).
+
 ## [0.1.6] - 2026-04-03
 
 ### Added

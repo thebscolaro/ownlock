@@ -711,6 +711,18 @@ MAX_SCAN_FILES = 10_000
 MAX_SCAN_DEPTH = 20
 
 
+def _is_dangerous_scan_root(directory: Path) -> bool:
+    """True when the scan root is a filesystem root (Unix ``/`` or a Windows drive root like ``C:\\``)."""
+    try:
+        resolved = directory.resolve()
+    except (OSError, RuntimeError):
+        return False
+    # Windows drive roots and POSIX `/` satisfy `path == path.parent`.
+    if resolved == resolved.parent:
+        return True
+    return resolved == Path("/")
+
+
 @app.command()
 @_safe_command
 def scan(
@@ -726,8 +738,8 @@ def scan(
     directory = _validate_scan_dir(directory)
 
     if _is_tty() and not yes:
-        # Guard against extremely broad scans (root or very high max_files)
-        if directory == Path("/") or max_files >= MAX_SCAN_FILES:
+        # Prompt only for dangerous roots or when --max-files exceeds the default cap.
+        if _is_dangerous_scan_root(directory) or max_files > MAX_SCAN_FILES:
             if not typer.confirm(
                 f"You're about to scan up to {max_files} files under {directory}. Continue?", default=False
             ):
