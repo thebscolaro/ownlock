@@ -340,6 +340,23 @@ class TestScan:
         assert "cancelled" in result.output.lower()
 
 
+class TestRewriteEnvLinesHelper:
+    """_rewrite_env_lines_to_vault_syntax — shared by auto and rewrite-env."""
+
+    def test_rewrites_matching_keys_preserves_comments_and_vault_lines(self):
+        from ownlock.cli import _rewrite_env_lines_to_vault_syntax
+
+        lines = ["# comment", "", "FOO=plain", 'BAR=vault("BAR")', "SKIP=keep"]
+        existing = {"FOO": "plain", "SKIP": "keep"}
+        out, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, "production")
+        assert changed == 2
+        joined = "\n".join(out)
+        assert 'FOO=vault("FOO", env="production")' in joined
+        assert 'SKIP=vault("SKIP", env="production")' in joined
+        assert "# comment" in joined
+        assert 'BAR=vault("BAR")' in joined
+
+
 class TestRewriteEnv:
     def test_rewrite_env_replaces_values_with_vault_calls(self, tmp_path, vault_db):
         """rewrite-env rewrites keys present in the vault and creates a backup."""

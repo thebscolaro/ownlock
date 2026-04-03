@@ -129,6 +129,44 @@ def _import_env_file_into_vault(env_file: Path, env: str, vm: VaultManager) -> i
     return count
 
 
+def _rewrite_env_lines_to_vault_syntax(
+    lines: list[str],
+    existing: dict[str, str],
+    env: str,
+) -> tuple[list[str], int]:
+    """Rewrite env lines to use ``vault()`` for keys present in *existing*.
+
+    Skips comments, blank lines, invalid key names, lines already using ``vault()``,
+    and keys not in *existing*.
+    """
+    new_lines: list[str] = []
+    changed = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        raw_value = value.strip()
+        if not _is_valid_secret_name(key):
+            new_lines.append(line)
+            continue
+        if raw_value.startswith("vault(\""):
+            new_lines.append(line)
+            continue
+        if key not in existing:
+            new_lines.append(line)
+            continue
+        if env == "default":
+            vault_expr = f'vault(\"{key}\")'
+        else:
+            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
+        new_lines.append(f"{key}={vault_expr}")
+        changed += 1
+    return new_lines, changed
+
+
 app = typer.Typer(
     name="ownlock",
     help="Lightweight secrets manager — encrypted vault, env injection, stdout redaction.",
@@ -590,38 +628,14 @@ def auto(
         )
         return
 
-    # Perform rewrite similar to rewrite-env
+    # Perform rewrite (shared logic with rewrite-env)
     original_text = rewrite_target.read_text()
     lines = original_text.splitlines()
 
     with VaultManager(vault_path, passphrase) as vm:
         existing = vm.get_all_decrypted(env)
 
-    new_lines: list[str] = []
-    changed = 0
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            new_lines.append(line)
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        raw_value = value.strip()
-        if not _is_valid_secret_name(key):
-            new_lines.append(line)
-            continue
-        if raw_value.startswith("vault(\""):
-            new_lines.append(line)
-            continue
-        if key not in existing:
-            new_lines.append(line)
-            continue
-        if env == "default":
-            vault_expr = f'vault(\"{key}\")'
-        else:
-            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
-        new_lines.append(f"{key}={vault_expr}")
-        changed += 1
+    new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
 
     if changed == 0:
         console.print(
@@ -661,34 +675,7 @@ def rewrite_env(
     with VaultManager(vault_path, passphrase) as vm:
         existing = vm.get_all_decrypted(env)
 
-    new_lines: list[str] = []
-    changed = 0
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            new_lines.append(line)
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        raw_value = value.strip()
-        if not _is_valid_secret_name(key):
-            new_lines.append(line)
-            continue
-        # Avoid rewriting lines that already use vault()
-        if raw_value.startswith("vault(\""):
-            new_lines.append(line)
-            continue
-        if key not in existing:
-            new_lines.append(line)
-            continue
-
-        if env == "default":
-            vault_expr = f'vault(\"{key}\")'
-        else:
-            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
-        new_lines.append(f"{key}={vault_expr}")
-        changed += 1
+    new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
 
     if changed == 0:
         console.print("[dim]No changes needed; env file already uses vault() or keys not in vault.[/dim]")
