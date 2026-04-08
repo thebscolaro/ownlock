@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ownlock"
-version = "0.1.8"
+version = "0.1.9"
 description = "Lightweight secrets manager — encrypted vault, env injection, stdout redaction. Optional MCP (stdio) delegates to CLI. No Docker, no cloud account."
 readme = "README.md"
 license = "MIT"

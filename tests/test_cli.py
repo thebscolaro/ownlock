@@ -1,5 +1,6 @@
 """Tests for ownlock.cli — Typer CLI commands."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -195,6 +196,41 @@ class TestList:
         assert result.exit_code == 0
         assert "MY_KEY" in result.output
 
+    def test_list_json_metadata_only(self, seeded_vault):
+        result = runner.invoke(app, ["list", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        row = data[0]
+        assert row["name"] == "MY_KEY"
+        assert row["env"] == "default"
+        assert "created_at" in row and "updated_at" in row
+        assert "my-value" not in result.output
+
+    def test_list_json_empty(self, vault_db):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        result = runner.invoke(app, ["list", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == []
+
+
+class TestDoctor:
+    def test_doctor_prints_diagnostics(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", tmp_path / "g" / "vault.db")
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: None),
+        )
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        out = result.output
+        assert "ownlock" in out.lower()
+        assert "Python" in out
+        assert "OWNLOCK_PASSPHRASE" in out
+        assert "Global vault" in out
+        assert "Project vault" in out
+
 
 class TestDelete:
     def test_delete_removes_secret(self, seeded_vault):
@@ -339,6 +375,14 @@ class TestScan:
         assert result.exit_code == 1
         assert "cancelled" in result.output.lower()
 
+    def test_scan_skips_oversized_files(self, tmp_path, seeded_vault):
+        """Files larger than --max-file-bytes are not read (leak in them is not detected)."""
+        big = tmp_path / "huge.txt"
+        big.write_text("x" * 500 + "my-value")
+        result = runner.invoke(app, ["scan", str(tmp_path), "--max-file-bytes", "100"])
+        assert result.exit_code == 0
+        assert "No leaked secrets found" in result.output
+
 
 class TestRewriteEnvLinesHelper:
     """_rewrite_env_lines_to_vault_syntax — shared by auto and rewrite-env."""
@@ -413,6 +457,18 @@ class TestExport:
         assert result.exit_code == 0
         assert "MY_KEY=my-value" in result.output
         assert "PLAIN=hello" in result.output
+
+    def test_export_example_emits_vault_lines(self, seeded_vault):
+        result = runner.invoke(app, ["export", "--example"])
+        assert result.exit_code == 0
+        assert 'MY_KEY=vault("MY_KEY")' in result.output.strip()
+
+    def test_export_example_non_default_env(self, vault_db, seeded_vault):
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("OTHER", "x", env="staging")
+        result = runner.invoke(app, ["export", "--example", "--env", "staging"])
+        assert result.exit_code == 0
+        assert 'OTHER=vault("OTHER", env="staging")' in result.output.strip()
 
 
 class TestRun:

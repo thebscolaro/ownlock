@@ -10,6 +10,8 @@ ownlock is a **local CLI** (plus optional stdio MCP). It is not a web app, so ma
 |--------|------|---------|
 | **SAST (Python)** | [Bandit](https://github.com/PyCQA/bandit) | Static analysis for common Python issues; configured via `[tool.bandit]` in [pyproject.toml](pyproject.toml). Run: `bandit -r ownlock -c pyproject.toml` |
 | **Dependency vulnerabilities** | [pip-audit](https://github.com/pypa/pip-audit) | Known CVEs in installed dependencies. Run after `pip install -e ".[mcp]"` (or full extras). CI upgrades pip before auditing. |
+
+**pip-audit and editable installs:** If you install ownlock in **editable** mode (`pip install -e .`), pip-audit may skip CVE lookup for the **ownlock** package itself (it is not resolved like a PyPI wheel in that layout). Your **dependencies** (for example `cryptography`, `typer`, `keyring`) are still audited. A normal `pip install ownlock` from PyPI is fully included in the audit.
 | **Regression tests** | pytest | [tests/test_security.py](tests/test_security.py) covers path traversal on **relative** paths, crypto/tamper behavior, invalid `vault()` keys, and **no shell** for subprocess helpers. |
 | **Smoke / e2e CLI** | pytest (`-m smoke` or full suite) | [tests/test_smoke.py](tests/test_smoke.py) runs the real CLI in a subprocess with an isolated `HOME` and `OWNLOCK_PASSPHRASE` — closer to user installs than in-process CliRunner. |
 

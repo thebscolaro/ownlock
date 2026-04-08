@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 import re
 from functools import wraps
 from pathlib import Path
@@ -307,6 +308,7 @@ def list_secrets(
     env: Optional[str] = typer.Option(None, "--env", "-e"),
     global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    as_json: bool = typer.Option(False, "--json", help="Print JSON array of name/env/timestamps (no secret values)."),
 ) -> None:
     """List stored secret names (never values)."""
     passphrase = resolve_passphrase()
@@ -316,7 +318,23 @@ def list_secrets(
         secrets = vm.list_secrets(env)
 
     if not secrets:
-        console.print("[dim]No secrets stored.[/dim]")
+        if as_json:
+            typer.echo("[]")
+        else:
+            console.print("[dim]No secrets stored.[/dim]")
+        return
+
+    if as_json:
+        payload = [
+            {
+                "name": s["name"],
+                "env": s["env"],
+                "created_at": s["created_at"],
+                "updated_at": s["updated_at"],
+            }
+            for s in secrets
+        ]
+        typer.echo(json.dumps(payload, indent=2))
         return
 
     table = Table(title="Secrets")
@@ -326,6 +344,41 @@ def list_secrets(
     for s in secrets:
         table.add_row(s["name"], s["env"], s["updated_at"][:19])
     console.print(table)
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """Print environment diagnostics (versions, vault paths, no secret values)."""
+    import importlib.util
+    import os
+    import sys
+
+    from importlib.metadata import version as pkg_version
+
+    console.print(f"[bold]ownlock[/bold] {pkg_version('ownlock')}")
+    console.print(f"Python {sys.version.split()[0]} — {sys.executable}")
+    console.print(
+        f"Global vault: {GLOBAL_VAULT_PATH} — "
+        f"{'exists' if GLOBAL_VAULT_PATH.exists() else 'missing'}"
+    )
+    pv = VaultManager.find_project_vault()
+    if pv:
+        console.print(f"Project vault: {pv} — exists")
+    else:
+        console.print("Project vault: (none found from cwd)")
+
+    console.print(f"OWNLOCK_PASSPHRASE: {'set' if os.environ.get('OWNLOCK_PASSPHRASE') else 'not set'}")
+
+    try:
+        from ownlock.keyring_util import get_passphrase
+
+        stored = get_passphrase()
+        console.print(f"Keyring passphrase: {'stored' if stored else 'not stored'}")
+    except Exception:
+        console.print("Keyring passphrase: unavailable (error reading keyring)")
+
+    mcp_ok = importlib.util.find_spec("mcp.server.fastmcp") is not None
+    console.print(f"MCP package importable: {'yes' if mcp_ok else 'no'} (pip install 'ownlock[mcp]')")
 
 
 @app.command()
@@ -384,10 +437,34 @@ def run(
 def export_env(
     env_file: Path = typer.Option(Path(".env"), "-f", "--file"),
     env: str = typer.Option("default", "--env", "-e"),
-    fmt: str = typer.Option("env", "--format", help="Output format: env, docker."),
+    fmt: str = typer.Option(
+        "env",
+        "--format",
+        help="Output format: env, docker (ignored with --example; example lines are always env-style vault() references).",
+    ),
+    example: bool = typer.Option(
+        False,
+        "--example",
+        help="Emit KEY=vault(...) lines for keys in the vault only; does not read .env.",
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault (with --example)."),
+    project: bool = typer.Option(False, "--project", help="Use project vault (with --example)."),
 ) -> None:
     """Print resolved KEY=VALUE pairs to stdout."""
     from ownlock.resolver import resolve_env_file
+
+    if example:
+        passphrase = resolve_passphrase()
+        vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+        with VaultManager(vault_path, passphrase) as vm:
+            rows = vm.list_secrets(env)
+        for s in sorted(rows, key=lambda x: x["name"]):
+            name = s["name"]
+            if env == "default":
+                typer.echo(f'{name}=vault("{name}")')
+            else:
+                typer.echo(f'{name}=vault("{name}", env="{env}")')
+        return
 
     env_file = _validate_env_file(env_file)
     passphrase = resolve_passphrase()
@@ -696,6 +773,7 @@ def rewrite_env(
 
 MAX_SCAN_FILES = 10_000
 MAX_SCAN_DEPTH = 20
+MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024  # 2 MiB — skip huge files before read_text
 
 
 def _is_dangerous_scan_root(directory: Path) -> bool:
@@ -719,6 +797,11 @@ def scan(
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
     max_files: int = typer.Option(MAX_SCAN_FILES, "--max-files", help="Maximum files to scan."),
     max_depth: int = typer.Option(MAX_SCAN_DEPTH, "--max-depth", help="Maximum directory depth."),
+    max_file_bytes: int = typer.Option(
+        MAX_SCAN_FILE_BYTES,
+        "--max-file-bytes",
+        help="Skip files larger than this many bytes (avoids reading huge binaries).",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Run without interactive confirmation prompts."),
 ) -> None:
     """Scan files for leaked secret values."""
@@ -762,6 +845,11 @@ def scan(
         if any(part in skip_dirs for part in file_path.parts):
             continue
         if file_path.suffix in skip_extensions:
+            continue
+        try:
+            if file_path.stat().st_size > max_file_bytes:
+                continue
+        except OSError:
             continue
         files_scanned += 1
         try:

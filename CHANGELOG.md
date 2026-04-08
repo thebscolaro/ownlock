@@ -5,6 +5,20 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-04-03
+
+### Added
+
+- **`ownlock doctor`**: prints version, Python, global/project vault paths (existence), whether `OWNLOCK_PASSPHRASE` is set (boolean only), keyring passphrase availability, and whether the MCP extra is importable — no secret values.
+- **`ownlock list --json`**: JSON array of `{name, env, created_at, updated_at}` (metadata only).
+- **`ownlock export --example`**: emits `KEY=vault("KEY")` lines for keys in the vault (`--global` / `--project` supported); `--format` does not apply. Non-default `--env` emits `vault("KEY", env="...")`.
+- **`ownlock scan --max-file-bytes`**: skips files larger than the limit (default 2 MiB) before reading.
+
+### Documentation
+
+- **[SECURITY_TESTING.md](SECURITY_TESTING.md)**: note on pip-audit skipping the editable ownlock package while still auditing dependencies.
+- **[README.md](README.md)**: CI/GitHub Actions (env-only vs optional ownlock + `OWNLOCK_PASSPHRASE`), optional pre-commit snippet for `ownlock scan`, command reference updates.
+
 ## [0.1.8] - 2026-04-04
 
 ### Changed

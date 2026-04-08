@@ -119,7 +119,7 @@ ownlock delete my-secret
 | `--global` | **Global vault** |
 | `--project` | **Project vault** at current directory |
 
-Commands that accept `--global` / `--project`: `set`, `get`, `list`, `delete`, `import`, `scan`. `run` and `export` read vault references from your `.env` file.
+Commands that accept `--global` / `--project`: `set`, `get`, `list`, `delete`, `import`, `scan`, and `export --example` (template lines from vault key names only). `run` and plain `export` resolve vault references from your `.env` file.
 
 ---
 
@@ -167,16 +167,17 @@ ownlock scan .
 | `ownlock init --global` | Create global vault only |
 | `ownlock set KEY` / `KEY=VALUE` | Store secret |
 | `ownlock get KEY` | Print decrypted value |
-| `ownlock list` | List secret names |
+| `ownlock list` | List secret names (`--json` for machine-readable metadata, no values) |
+| `ownlock doctor` | Environment diagnostics (versions, vault paths, no secret values) |
 | `ownlock delete KEY` | Remove a secret |
 | `ownlock run -- CMD` | Resolve `.env`, inject secrets, redact stdout |
-| `ownlock export` | Print resolved KEY=VALUE pairs |
+| `ownlock export` | Print resolved KEY=VALUE pairs (`--example` emits `KEY=vault("KEY")` lines from vault names only) |
 | `ownlock import FILE` | Bulk import from plaintext .env |
 | `ownlock rewrite-env` | Rewrite env file to use `vault()` |
 | `ownlock auto` | Guided import + rewrite |
-| `ownlock scan DIR` | Scan for leaked secret values |
+| `ownlock scan DIR` | Scan for leaked secret values (`--max-file-bytes` skips huge files before reading) |
 
-Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan` to override vault selection.
+Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan`, and `export --example` to override vault selection.
 
 ---
 
@@ -189,6 +190,31 @@ Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan
 
 ---
 
+## CI and GitHub Actions
+
+The vault is a **local SQLite file** (project `.ownlock/vault.db` or global `~/.ownlock/vault.db`). `.ownlock/` is **gitignored by default**, so CI does **not** see the vault on your laptop unless you deliberately ship something into the job.
+
+**Secrets only in CI (no ownlock):** Put API keys and connection strings in your platform’s encrypted secrets (for example GitHub Actions secrets) and pass them into the job as **environment variables**. Tests and builds read `DATABASE_URL`, `API_KEY`, and so on from the environment. Many teams use ownlock **only on developer machines** and rely on plain env vars in CI.
+
+**Optional ownlock in CI:** A clean runner has no vault file until you create one. You can set **`OWNLOCK_PASSPHRASE`** from a secret, `pip install ownlock`, then run `ownlock set` / `ownlock import`, or restore a vault artifact you manage outside git. Runs are usually **ephemeral**; you normally do **not** commit `vault.db`.
+
+### pre-commit (optional)
+
+Example hook to run `ownlock scan` before commits (requires ownlock on `PATH` and a usable passphrase via keyring or `OWNLOCK_PASSPHRASE` in the environment where hooks run):
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: ownlock-scan
+        name: ownlock scan
+        entry: ownlock scan .
+        language: system
+        pass_filenames: false
+```
+
+---
+
 ## Security
 
 - **Encryption**: Each secret is encrypted with AES-256-GCM; the vault stores ciphertext only.
@@ -196,7 +222,7 @@ Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan
 - **get / export**: Both print secrets to stdout. Use in trusted environments only; prefer `ownlock run` to inject without printing.
 - **Overwrite**: `set` and `import` overwrite existing values for the same key (and env); no append.
 - **File permissions**: Restrict permissions on `~/.ownlock/` and `.ownlock/`. Project init adds `.ownlock/` to `.gitignore`.
-- **Automated checks**: Bandit, pip-audit, security-focused tests, and subprocess smoke tests (`pytest -m smoke`) — see [SECURITY_TESTING.md](SECURITY_TESTING.md).
+- **Automated checks**: Bandit, pip-audit, security-focused tests, and subprocess smoke tests (`pytest -m smoke`) — see [SECURITY_TESTING.md](SECURITY_TESTING.md). Editable installs may skip CVE lookup for the ownlock package itself; dependencies are still audited.
 
 ---
 
