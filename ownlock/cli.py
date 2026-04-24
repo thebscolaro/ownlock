@@ -408,6 +408,35 @@ def run(
     env_file: Path = typer.Option(Path(".env"), "-f", "--file", help="Path to .env file."),
     env: str = typer.Option("default", "--env", "-e", help="Environment for vault lookups."),
     no_redact: bool = typer.Option(False, "--no-redact-stdout", help="Disable stdout redaction."),
+    render_templates: Optional[list[Path]] = typer.Option(
+        None,
+        "--render",
+        help=(
+            "Template file to render before running (repeat for multiple). "
+            "Auto-discovery is intentionally NOT done here to avoid rendering "
+            "untrusted templates in the current directory. Use `ownlock render` "
+            "by itself if you want discovery."
+        ),
+    ),
+    render_cleanup: bool = typer.Option(
+        False,
+        "--render-cleanup",
+        help=(
+            "With --render: unlink rendered output files after the command exits. "
+            "Note: combined with --force, this can remove a pre-existing file you "
+            "overwrote."
+        ),
+    ),
+    force_render: bool = typer.Option(
+        False,
+        "--force",
+        help="With --render: skip the gitignore safety check for rendered outputs.",
+    ),
+    raw_render: bool = typer.Option(
+        False,
+        "--raw",
+        help="With --render: insert values verbatim (disable format-aware escaping).",
+    ),
     command: list[str] = typer.Argument(None, help="Command to run."),
 ) -> None:
     """Resolve .env vault() references, inject secrets, and run a command."""
@@ -422,14 +451,215 @@ def run(
     passphrase = resolve_passphrase()
     resolved, secret_names = resolve_env_file(env_file, passphrase, env=env)
 
+    rendered_outputs: list[Path] = []
+    if render_templates:
+        rendered_outputs = _render_explicit_templates(
+            render_templates,
+            passphrase,
+            default_env=env,
+            force=force_render,
+            raw=raw_render,
+        )
+
     if no_redact:
         secrets_for_redaction: dict[str, str] = {}
     else:
         secrets_for_redaction = {k: resolved[k] for k in secret_names if k in resolved}
 
     redactor = SecretRedactor(secrets_for_redaction)
-    exit_code = redactor.run_process(command, resolved)
+    try:
+        exit_code = redactor.run_process(command, resolved)
+    finally:
+        if render_cleanup and rendered_outputs:
+            for p in rendered_outputs:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
     raise typer.Exit(exit_code)
+
+
+@app.command("render")
+@_safe_command
+def render(
+    template: Optional[Path] = typer.Argument(
+        None,
+        help="Template file to render. Omit to discover all *.template.* under cwd.",
+    ),
+    out: Optional[Path] = typer.Option(
+        None,
+        "-o",
+        "--out",
+        help="Destination path (single-template mode only).",
+    ),
+    env: str = typer.Option("default", "--env", "-e", help="Vault environment for lookups."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print planned actions; write nothing."),
+    force: bool = typer.Option(False, "--force", help="Skip gitignore safety check for outputs."),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help=(
+            "Insert secret values verbatim (no format escaping). By default, "
+            "values are escaped for the output file's format (JSON, XML, YAML, "
+            "TOML, INI, .env, shell, HCL) based on its extension. Per-reference "
+            "format=\"...\" always wins."
+        ),
+    ),
+) -> None:
+    """Render *.template.* files, replacing {{vault(...)}} with decrypted values."""
+    from ownlock.resolver import VaultLookup
+    from ownlock.templates import (
+        detect_format,
+        discover_templates,
+        find_unmatched_vault_refs,
+        is_path_gitignored,
+        render_text,
+        template_output_path,
+        write_atomic,
+    )
+
+    passphrase = resolve_passphrase()
+
+    if template is not None:
+        template = _validate_env_file(template)
+        if not template.exists():
+            console.print("[red]Template not found.[/red]")
+            raise typer.Exit(1)
+        if out is not None:
+            dst = _validate_env_file(out)
+        else:
+            try:
+                dst = template_output_path(template)
+            except ValueError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+        pairs: list[tuple[Path, Path]] = [(template, dst)]
+    else:
+        if out is not None:
+            console.print("[red]--out is only valid when rendering a single template.[/red]")
+            raise typer.Exit(1)
+        discovered = discover_templates(Path.cwd())
+        if not discovered:
+            console.print("[dim]No *.template.* files found under current directory.[/dim]")
+            return
+        pairs = [(t, template_output_path(t)) for t in discovered]
+
+    if dry_run:
+        for src, dst in pairs:
+            fmt = "raw" if raw else detect_format(dst)
+            console.print(f"  {src} -> {dst} [{fmt}]")
+        return
+
+    rendered = 0
+    with VaultLookup(passphrase) as lookup:
+        for src, dst in pairs:
+            text = src.read_text(encoding="utf-8")
+            default_format = "raw" if raw else detect_format(dst)
+            new_text, refs = render_text(
+                text, lookup, default_env=env, default_format=default_format
+            )
+            if refs == 0:
+                console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
+                continue
+            if not force and not is_path_gitignored(dst):
+                console.print(
+                    f"[red]{dst} does not appear to be gitignored. Refusing to write.[/red]"
+                )
+                console.print(
+                    f"[dim]Add '{dst.name}' (or the full path) to .gitignore, "
+                    "or re-run with --force.[/dim]"
+                )
+                raise typer.Exit(1)
+            write_atomic(dst, new_text)
+            console.print(
+                f"[green]Rendered {src} -> {dst} "
+                f"({refs} value(s), format={default_format}).[/green]"
+            )
+            _warn_unmatched(src, new_text, find_unmatched_vault_refs)
+            rendered += 1
+
+    if rendered == 0:
+        console.print("[dim]Nothing rendered.[/dim]")
+
+
+def _warn_unmatched(src: Path, rendered_text: str, finder) -> None:
+    """Print a yellow warning for any ``{{vault(`` fragments left in *rendered_text*."""
+    leftovers = finder(rendered_text)
+    if not leftovers:
+        return
+    console.print(
+        f"[yellow]Warning: {src} contains {len(leftovers)} "
+        "malformed vault() reference(s) (wrong quotes or missing braces). "
+        "These were left as literal text in the rendered output:[/yellow]"
+    )
+    for line_num, excerpt in leftovers[:3]:
+        console.print(f"[yellow]  line {line_num}: {excerpt}[/yellow]")
+    if len(leftovers) > 3:
+        console.print(f"[yellow]  ... and {len(leftovers) - 3} more[/yellow]")
+
+
+def _render_explicit_templates(
+    templates: list[Path],
+    passphrase: str,
+    *,
+    default_env: str = "default",
+    force: bool = False,
+    raw: bool = False,
+) -> list[Path]:
+    """Render each path in *templates*. Returns paths that were written.
+
+    Unlike ``ownlock render`` with no args, this does NOT discover templates.
+    Callers (``ownlock run --render``) must list every template explicitly to
+    avoid rendering untrusted files that happen to live under the cwd.
+    """
+    from ownlock.resolver import VaultLookup
+    from ownlock.templates import (
+        detect_format,
+        find_unmatched_vault_refs,
+        is_path_gitignored,
+        render_text,
+        template_output_path,
+        write_atomic,
+    )
+
+    resolved_pairs: list[tuple[Path, Path]] = []
+    for t in templates:
+        src = _validate_env_file(t)
+        if not src.exists():
+            console.print(f"[red]Template not found: {t}[/red]")
+            raise typer.Exit(1)
+        try:
+            dst = template_output_path(src)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        resolved_pairs.append((src, dst))
+
+    written: list[Path] = []
+    with VaultLookup(passphrase) as lookup:
+        for src, dst in resolved_pairs:
+            text = src.read_text(encoding="utf-8")
+            default_format = "raw" if raw else detect_format(dst)
+            new_text, refs = render_text(
+                text, lookup, default_env=default_env, default_format=default_format
+            )
+            if refs == 0:
+                console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
+                continue
+            if not force and not is_path_gitignored(dst):
+                console.print(
+                    f"[red]{dst} does not appear to be gitignored. Refusing to write.[/red]"
+                )
+                console.print("[dim]Add it to .gitignore or re-run with --force.[/dim]")
+                raise typer.Exit(1)
+            write_atomic(dst, new_text)
+            console.print(
+                f"[green]Rendered {src} -> {dst} "
+                f"({refs} value(s), format={default_format}).[/green]"
+            )
+            _warn_unmatched(src, new_text, find_unmatched_vault_refs)
+            written.append(dst)
+    return written
 
 
 @app.command("export")

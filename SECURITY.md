@@ -23,8 +23,22 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 
 Automated checks (Bandit, pip-audit, targeted pytest) and OWASP-oriented mapping are described in [SECURITY_TESTING.md](SECURITY_TESTING.md).
 
+## Rendered templates
+
+`ownlock render` (and `ownlock run --render`) materializes files from `<name>.template.<ext>` templates containing `{{vault(...)}}` references. These rendered files contain plaintext secret values and must be treated like any other secret file:
+
+- ownlock writes them atomically (`tempfile` + `os.replace`) and sets mode `0600` on POSIX.
+- ownlock refuses to overwrite a destination that does not appear in `.gitignore` unless `--force` is passed. The check prefers `git check-ignore` when git is on `PATH` and the destination is inside a git repository — full gitignore semantics (negation, anchored patterns, nested `.gitignore`, `.git/info/exclude`, global ignore) are honored. When git is unavailable, a best-effort fnmatch scan is used as a fallback.
+- Stdout redaction in `ownlock run` does not redact content your app writes *from* a rendered file; the file itself is the boundary.
+- `--render-cleanup` unlinks rendered files after the child process exits, but cannot protect against reads that occur while the file exists on disk. Combined with `--force`, it can remove a pre-existing file that the render overwrote — only combine those flags when you are certain no user-owned data lives at the destination path.
+- `ownlock run --render` requires **explicit template paths**; it never auto-discovers. This prevents a malicious cwd from placing a template + matching `.gitignore` that would cause `run --render` to write your vault values into an attacker-controlled file. The standalone `ownlock render` still does discovery because the command was invoked intentionally — still, prefer passing explicit template paths when running in untrusted directories.
+- Template discovery does not follow directory or file symlinks (`os.walk` with `followlinks=False`), which prevents a symlink from pulling files outside the project into the render set.
+- Vault values are escaped for the output file's format (JSON/TOML/YAML/HCL, XML, INI/properties, .env, shell), detected from the rendered file's extension. This prevents a secret containing a quote, backslash, newline, or an XML special character from breaking the output file's syntax or injecting structure. Per-reference overrides (`format="..."`) and the `--raw` flag can disable escaping for formats ownlock doesn't recognize — when using `--raw` or `format="raw"`, the verbatim-insertion caveat applies and you are responsible for quoting in the template.
+- An interrupted write can leave a `.<name>.<rand>.ownlock-tmp` file next to the destination with plaintext content. Mode `0600` (POSIX) limits exposure. `ownlock scan` will flag such a file if committed.
+
 ## Known limitations
 
 - Decrypted secrets exist in process memory while commands run.
 - Environment variables are visible to child processes and can appear in process listings.
 - The system keyring can be accessed by other applications running as the same user.
+- When git is not available on `PATH`, `ownlock render`'s gitignore safety check falls back to a best-effort fnmatch scan that does not implement full gitignore semantics (negation, anchored `**` patterns, `.git/info/exclude`). Installing git enables full semantics via `git check-ignore`.
