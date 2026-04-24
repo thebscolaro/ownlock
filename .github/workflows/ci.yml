@@ -52,11 +52,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install and audit
+        # CVE-2026-3219 is a pip-in-pip advisory (polyglot tar+zip install):
+        # fix is merged upstream in pypa/pip#13870 but not yet in a released
+        # pip. Local-only, requires user interaction, no confidentiality
+        # impact. Remove this ignore once a pip release containing the fix
+        # is on PyPI.
         run: |
           python -m pip install --upgrade "pip>=26"
           pip install -e ".[dev,mcp]"
           bandit -r ownlock -c pyproject.toml -f txt
-          pip-audit
+          pip-audit --ignore-vuln CVE-2026-3219
 
   build:
     runs-on: ubuntu-latest
