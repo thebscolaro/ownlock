@@ -30,7 +30,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import xml.sax.saxutils
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -70,9 +69,18 @@ def _escape_json(value: str) -> str:
 
 
 def _escape_xml(value: str) -> str:
-    """Escape for XML text content and attribute values (quotes included)."""
-    return xml.sax.saxutils.escape(
-        value, {'"': "&quot;", "'": "&apos;"}
+    """Escape for XML text content and attribute values.
+
+    Replaces the five XML predefined entities. Order matters: ``&`` must be
+    replaced first so that entity introducers from later replacements are not
+    double-escaped.
+    """
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
     )
 
 

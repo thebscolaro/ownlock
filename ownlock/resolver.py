@@ -57,7 +57,13 @@ class VaultLookup:
 
         if pick_project:
             if self._project_vm is None:
-                assert self._project_path is not None
+                # pick_project can only be True when self._project_path is truthy,
+                # but we re-check at runtime so this is safe under python -O where
+                # asserts are stripped.
+                if self._project_path is None:
+                    raise RuntimeError(
+                        "project vault path unexpectedly missing after selection"
+                    )
                 self._project_vm = VaultManager(self._project_path, self._passphrase)
                 self._project_vm.open()
             value = self._project_vm.get(name, env)
