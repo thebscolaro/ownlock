@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
 from typing import IO
+
+
+def _resolve_cmd_for_subprocess(cmd: list[str], merged_env: dict[str, str]) -> list[str]:
+    """Copy *cmd*; on Windows resolve argv0 via PATH/PATHEXT (e.g. ``npm`` → ``npm.cmd``)."""
+    cmd_resolved = list(cmd)
+    if sys.platform != "win32" or not cmd_resolved:
+        return cmd_resolved
+    resolved = shutil.which(cmd_resolved[0], path=merged_env.get("PATH"))
+    if resolved:
+        cmd_resolved[0] = resolved
+    return cmd_resolved
 
 
 class SecretRedactor:
@@ -46,12 +58,15 @@ class SecretRedactor:
         """Run *cmd* with *env*, streaming redacted stdout/stderr.
 
         Uses threading for cross-platform compatibility (select() does not
-        work with pipes on Windows).
+        work with pipes on Windows). On Windows, the executable is resolved
+        with :func:`shutil.which` on ``cmd[0]`` using the merged ``PATH`` so
+        bare names like ``npm`` match ``npm.cmd``.
         """
         merged_env = {**os.environ, **env}
+        cmd_resolved = _resolve_cmd_for_subprocess(cmd, merged_env)
 
         proc = subprocess.Popen(
-            cmd,
+            cmd_resolved,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=merged_env,
