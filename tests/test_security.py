@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import base64
 import io
+import shutil
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -92,9 +94,18 @@ class TestSubprocessWithoutShell:
             red = SecretRedactor({})
             red.run_process(["echo", "hi"], {"A": "b"})
             mock_popen.assert_called_once()
-            pos, kwargs = mock_popen.call_args
+            ca = mock_popen.call_args
+            cmd = ca.args[0]
+            kwargs = ca.kwargs
             assert kwargs.get("shell") in (None, False)
-            assert pos[0] == ["echo", "hi"]
+            assert isinstance(cmd, list)
+            assert cmd[1:] == ["hi"]
+            merged_path = kwargs["env"].get("PATH")
+            if sys.platform == "win32":
+                resolved = shutil.which("echo", path=merged_path)
+                assert cmd[0] == (resolved if resolved else "echo")
+            else:
+                assert cmd == ["echo", "hi"]
 
 
 class TestMcpDelegatesSubprocess:
