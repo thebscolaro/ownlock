@@ -237,6 +237,42 @@ ownlock run --render web.template.config --render-cleanup -- ./start.sh   # unli
 
 `{{vault(...)}}` accepts the same options as the `.env` form: `env="production"`, `project=true`, `global=true`.
 
+### Harness pipeline YAML
+
+Harness pipelines and templates often contain Harness expressions such as `<+pipeline.variables.env>` or `<+secrets.getValue(...)>`. ownlock does **not** evaluate those expressions or implement JEXL locally. It only replaces `{{vault(...)}}` references, then leaves every `<+...>` expression untouched for Harness to evaluate at runtime.
+
+```yaml
+# pipeline.template.yaml
+pipeline:
+  name: deploy
+  identifier: deploy
+  variables:
+    - name: environment
+      type: String
+      value: <+pipeline.variables.environment>
+    - name: docker_password
+      type: Secret
+      value: "{{vault("docker-password", env="production")}}"
+  stages:
+    - stage:
+        name: Deploy <+pipeline.variables.environment>
+        identifier: deploy
+        type: Deployment
+        spec:
+          service:
+            serviceRef: <+input>
+          environment:
+            environmentRef: <+pipeline.variables.environment>
+```
+
+Render it before handing the file to Harness:
+
+```bash
+ownlock render pipeline.template.yaml
+```
+
+The rendered `pipeline.yaml` contains the decrypted secret value, while expressions like `<+input>` and `<+pipeline.variables.environment>` are still present exactly as written. Add the rendered output to `.gitignore`, or pass `--force` if you intentionally want to override the safety check.
+
 ### What about non-secret per-env config?
 
 ownlock deliberately handles **secrets only**. Values that vary per environment but aren't sensitive — log levels, port numbers, hostnames, feature flags — should keep using your app's native mechanism:
