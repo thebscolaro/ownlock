@@ -84,6 +84,7 @@ jobs:
         with:
           name: dist
           path: dist/
+          retention-days: 7
 
   # Only publish after build succeeds AND tests/security pass (avoid uploading broken releases).
   publish:
