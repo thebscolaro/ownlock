@@ -598,6 +598,93 @@ class TestRun:
         assert "[REDACTED:" in result.output or result.exit_code == 0
 
 
+class TestBootstrap:
+    """ownlock bootstrap: fill in missing vault() references for new teammates."""
+
+    def test_bootstrap_with_values_from_json(self, tmp_path, vault_db, monkeypatch):
+        """Missing keys are read from --values-from and stored; existing keys untouched."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("ALREADY_THERE", "x")
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            'API_KEY=vault("API_KEY")\n'
+            'DB_URL=vault("DB_URL")\n'
+            'KNOWN=vault("ALREADY_THERE")\n'
+            "PLAIN=hello\n"
+        )
+
+        values_file = tmp_path / "values.json"
+        values_file.write_text(json.dumps({"API_KEY": "ak-123", "DB_URL": "postgres://"}))
+
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
+        )
+        assert result.exit_code == 0
+        assert "Missing 2 secret(s)" in result.output
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("API_KEY") == "ak-123"
+            assert vm.get("DB_URL") == "postgres://"
+            assert vm.get("ALREADY_THERE") == "x"
+
+    def test_bootstrap_idempotent_when_all_present(self, tmp_path, vault_db, monkeypatch):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("K1", "v1")
+            vm.set("K2", "v2")
+
+        env_file = tmp_path / ".env"
+        env_file.write_text('A=vault("K1")\nB=vault("K2")\n')
+
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["bootstrap", "-f", str(env_file)])
+        assert result.exit_code == 0
+        assert "already populated" in result.output
+
+    def test_bootstrap_no_env_files(self, tmp_path, vault_db, monkeypatch):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["bootstrap"])
+        assert result.exit_code == 0
+        assert "No env files found" in result.output
+
+    def test_bootstrap_non_interactive_without_values_errors(self, tmp_path, vault_db, monkeypatch):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('NEED=vault("NEED")\n')
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: False)
+        result = runner.invoke(app, ["bootstrap", "-f", str(env_file)])
+        assert result.exit_code == 1
+        assert "values-from" in result.output
+
+    def test_bootstrap_picks_up_env_argument(self, tmp_path, vault_db, monkeypatch):
+        """vault('K', env='production') is checked against the production env."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('PROD_KEY=vault("PROD_KEY", env="production")\n')
+
+        values_file = tmp_path / "v.json"
+        values_file.write_text(json.dumps({"PROD_KEY": "secret-prod"}))
+
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            app,
+            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
+        )
+        assert result.exit_code == 0
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("PROD_KEY", env="production") == "secret-prod"
+            assert vm.get("PROD_KEY") is None
+
+
 class TestRekey:
     """ownlock rekey: passphrase rotation and KDF upgrade."""
 

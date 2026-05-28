@@ -115,6 +115,37 @@ class VaultLookup:
         self.close()
 
 
+def collect_vault_refs(env_path: Path) -> list[dict[str, Optional[str]]]:
+    """Scan *env_path* and return every ``vault(...)`` reference it contains.
+
+    Each entry is a dict with keys ``key``, ``env_arg`` (the explicit
+    ``env="..."`` from the call, or ``None``), ``project``, ``use_global``.
+    Used by ``ownlock bootstrap`` to figure out which secrets a project's
+    ``.env`` expects without decrypting anything.
+    """
+    refs: list[dict[str, Optional[str]]] = []
+    if not env_path.exists():
+        return refs
+    for line in env_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        _, _, raw_value = stripped.partition("=")
+        match = _VAULT_RE.match(raw_value.strip())
+        if not match:
+            continue
+        kwargs = parse_vault_kwargs(match.group(2))
+        refs.append(
+            {
+                "key": match.group(1),
+                "env_arg": kwargs.get("env"),
+                "project": kwargs.get("project"),
+                "use_global": kwargs.get("global"),
+            }
+        )
+    return refs
+
+
 def resolve_env_file(
     env_path: Path,
     passphrase: str,

@@ -1214,6 +1214,145 @@ def import_env(
     console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
 
 
+@app.command("bootstrap")
+@_safe_command
+def bootstrap(
+    env_files: Optional[list[Path]] = typer.Option(
+        None,
+        "-f",
+        "--file",
+        help="Env file(s) to scan for vault() references. Defaults to common .env* files.",
+    ),
+    env: str = typer.Option("default", "--env", "-e", help="Vault environment for missing keys."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip final confirmation prompt."),
+    values_from: Optional[Path] = typer.Option(
+        None,
+        "--values-from",
+        help="JSON file mapping {key: value} for missing secrets (non-interactive).",
+    ),
+) -> None:
+    """Onboard a teammate: prompt only for vault() keys missing from the vault.
+
+    Reads ``.env`` (and common variants) for ``vault("name")`` references,
+    compares against what's already in the vault, and asks for the rest. A
+    new dev can run this once after cloning to fill in the secrets the
+    project expects, without learning what every key is from a teammate over
+    Slack.
+    """
+    from ownlock.resolver import collect_vault_refs
+
+    if env_files:
+        candidates = [_validate_env_file(Path(f)) for f in env_files]
+    else:
+        candidates = [
+            _validate_env_file(Path(name))
+            for name in (".env", ".env.local", ".env.development", ".env.production")
+            if (Path.cwd() / name).exists()
+        ]
+
+    candidates = [c for c in candidates if c.exists()]
+    if not candidates:
+        console.print(
+            "[dim]No env files found. Use --file to specify one, or create a .env "
+            'file with vault("...") references.[/dim]'
+        )
+        return
+
+    # Collect every vault() reference; deduplicate by (key, env, vault selection).
+    seen: set[tuple[str, str]] = set()
+    refs: list[tuple[str, str, Optional[bool], Optional[bool]]] = []
+    for path in candidates:
+        for ref in collect_vault_refs(path):
+            key = ref["key"]
+            ref_env = ref["env_arg"] or env
+            if (key, ref_env) in seen:
+                continue
+            seen.add((key, ref_env))
+            project_flag = ref.get("project")
+            global_flag = ref.get("use_global")
+            project_bool = (project_flag == "true") if project_flag else None
+            global_bool = (global_flag == "true") if global_flag else None
+            refs.append((key, ref_env, project_bool, global_bool))
+
+    if not refs:
+        console.print("[dim]No vault() references found in scanned env files.[/dim]")
+        return
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    missing: list[tuple[str, str]] = []
+    with VaultManager(vault_path, passphrase) as vm:
+        for key, ref_env, _proj, _glob in refs:
+            if vm.get(key, ref_env) is None:
+                missing.append((key, ref_env))
+
+    if not missing:
+        console.print(
+            f"[green]All {len(refs)} vault() reference(s) already populated. "
+            "Nothing to do.[/green]"
+        )
+        return
+
+    console.print(
+        f"[bold]Missing {len(missing)} secret(s)[/bold] "
+        f"(of {len(refs)} reference(s) found):"
+    )
+    for key, ref_env in missing:
+        suffix = f" (env={ref_env})" if ref_env != "default" else ""
+        console.print(f"  - {key}{suffix}")
+
+    # Source values: --values-from JSON or interactive prompts.
+    supplied: dict[tuple[str, str], str] = {}
+    if values_from is not None:
+        try:
+            payload = json.loads(values_from.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            console.print(f"[red]Could not read --values-from: {e}[/red]")
+            raise typer.Exit(1)
+        if not isinstance(payload, dict):
+            console.print("[red]--values-from must contain a JSON object.[/red]")
+            raise typer.Exit(1)
+        for key, ref_env in missing:
+            if key in payload:
+                supplied[(key, ref_env)] = str(payload[key])
+
+    if not supplied:
+        if not _is_tty():
+            console.print(
+                "[red]Non-interactive run with no --values-from. "
+                "Pass values via --values-from or run interactively.[/red]"
+            )
+            raise typer.Exit(1)
+        for key, ref_env in missing:
+            value = getpass.getpass(f"Enter value for {key} (env={ref_env}): ")
+            if value:
+                supplied[(key, ref_env)] = value
+
+    if not supplied:
+        console.print("[dim]No values provided. Nothing to write.[/dim]")
+        return
+
+    if _is_tty() and not yes and not values_from:
+        if not typer.confirm(
+            f"Save {len(supplied)} new secret(s) to {_format_vault_path(vault_path)}?",
+            default=True,
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        for (key, ref_env), value in supplied.items():
+            vm.set(key, value, ref_env)
+
+    console.print(f"[green]Stored {len(supplied)} secret(s).[/green]")
+    skipped = len(missing) - len(supplied)
+    if skipped:
+        console.print(f"[dim]Skipped {skipped} (no value provided).[/dim]")
+
+
 @app.command("auto")
 @_safe_command
 def auto(
