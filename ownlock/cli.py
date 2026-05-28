@@ -100,6 +100,69 @@ def _write_env_backup(env_file: Path, content: str) -> Path:
     )
 
 
+def _prompt_new_passphrase(label: str = "vault") -> str:
+    """Prompt twice for a new passphrase; bail on mismatch or empty input.
+
+    Used by ``init`` (both global and project paths) and ``rekey``. Each
+    caller used to inline the same six-line pattern; centralizing it keeps
+    the empty/mismatch error wording identical everywhere.
+    """
+    passphrase = getpass.getpass(f"Choose a {label} passphrase: ")
+    if not passphrase:
+        console.print("[red]Passphrase cannot be empty.[/red]")
+        raise typer.Exit(1)
+    confirm = getpass.getpass("Confirm passphrase: ")
+    if passphrase != confirm:
+        console.print("[red]Passphrases do not match.[/red]")
+        raise typer.Exit(1)
+    return passphrase
+
+
+def _save_passphrase_to_keyring(passphrase: str) -> None:
+    """Best-effort keyring save with a consistent user-facing message.
+
+    On success: print confirmation. On failure: print a hint pointing at
+    ``OWNLOCK_PASSPHRASE`` plus the underlying error so users in CI / locked
+    down hosts know which env var to set.
+    """
+    ok, keyring_err = store_passphrase(passphrase)
+    if ok:
+        console.print("[dim]Passphrase saved to system keyring.[/dim]")
+    else:
+        detail = f" ({keyring_err})" if keyring_err else ""
+        console.print(
+            f"[dim]Could not save to keyring{detail}. Use OWNLOCK_PASSPHRASE env var.[/dim]"
+        )
+
+
+def _resolve_bundle_passphrase(*, confirm: bool) -> str:
+    """Resolve the share-bundle passphrase from env or interactive prompt.
+
+    Used by ``share`` (confirm=True) and ``import-share`` (confirm=False).
+    The bundle passphrase is intentionally distinct from the vault
+    passphrase so users can hand a bundle to someone without revealing
+    their main vault passphrase.
+    """
+    pp = os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE")
+    if pp is not None:
+        return pp
+    if not _is_tty():
+        console.print(
+            "[red]Non-interactive run requires OWNLOCK_BUNDLE_PASSPHRASE.[/red]"
+        )
+        raise typer.Exit(1)
+    pp = getpass.getpass("Bundle passphrase: ")
+    if not pp:
+        console.print("[red]Bundle passphrase cannot be empty.[/red]")
+        raise typer.Exit(1)
+    if confirm:
+        check = getpass.getpass("Confirm bundle passphrase: ")
+        if pp != check:
+            console.print("[red]Passphrases do not match.[/red]")
+            raise typer.Exit(1)
+    return pp
+
+
 app = typer.Typer(
     name="ownlock",
     help="Lightweight secrets manager — encrypted vault, env injection, stdout redaction.",
@@ -120,24 +183,10 @@ def init(
         if GLOBAL_VAULT_PATH.exists():
             console.print(f"[yellow]Vault already exists at {_format_vault_path(GLOBAL_VAULT_PATH)}[/yellow]")
             raise typer.Exit(0)
-        passphrase = getpass.getpass("Choose a vault passphrase: ")
-        if not passphrase:
-            console.print("[red]Passphrase cannot be empty.[/red]")
-            raise typer.Exit(1)
-        confirm = getpass.getpass("Confirm passphrase: ")
-        if passphrase != confirm:
-            console.print("[red]Passphrases do not match.[/red]")
-            raise typer.Exit(1)
-        vm = VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase)
-        vm.close()
-        ok, keyring_err = store_passphrase(passphrase)
-        if ok:
-            console.print("[dim]Passphrase saved to system keyring.[/dim]")
-        else:
-            detail = f" ({keyring_err})" if keyring_err else ""
-            console.print(
-                f"[dim]Could not save to keyring{detail}. Use OWNLOCK_PASSPHRASE env var.[/dim]"
-            )
+        passphrase = _prompt_new_passphrase()
+        VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
+        _save_passphrase_to_keyring(passphrase)
+        audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
         console.print(f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]")
         return
 
@@ -148,27 +197,13 @@ def init(
 
     if not GLOBAL_VAULT_PATH.exists():
         # First run: create global vault and keyring, then project vault with same passphrase
-        passphrase = getpass.getpass("Choose a vault passphrase: ")
-        if not passphrase:
-            console.print("[red]Passphrase cannot be empty.[/red]")
-            raise typer.Exit(1)
-        confirm = getpass.getpass("Confirm passphrase: ")
-        if passphrase != confirm:
-            console.print("[red]Passphrases do not match.[/red]")
-            raise typer.Exit(1)
-        vm_global = VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase)
-        vm_global.close()
-        ok, keyring_err = store_passphrase(passphrase)
-        if ok:
-            console.print("[dim]Passphrase saved to system keyring.[/dim]")
-        else:
-            detail = f" ({keyring_err})" if keyring_err else ""
-            console.print(
-                f"[dim]Could not save to keyring{detail}. Use OWNLOCK_PASSPHRASE env var.[/dim]"
-            )
-        vm_proj = VaultManager.init_vault(project_path, passphrase)
-        vm_proj.close()
+        passphrase = _prompt_new_passphrase()
+        VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
+        _save_passphrase_to_keyring(passphrase)
+        VaultManager.init_vault(project_path, passphrase).close()
         _ensure_gitignore()
+        audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
+        audit.record("init", vault_path=project_path, extra={"scope": "project"})
         console.print(
             f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
             f"[dim](passphrase in keyring; global vault at {_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
@@ -177,9 +212,9 @@ def init(
 
     # Global exists: create only project vault using keyring passphrase
     passphrase = resolve_passphrase()
-    vm = VaultManager.init_vault(project_path, passphrase)
-    vm.close()
+    VaultManager.init_vault(project_path, passphrase).close()
     _ensure_gitignore()
+    audit.record("init", vault_path=project_path, extra={"scope": "project"})
     console.print(f"[green]Vault created at {_format_vault_path(project_path)}[/green]")
 
 
@@ -558,14 +593,7 @@ def rekey(
                     "OWNLOCK_NEW_PASSPHRASE.[/red]"
                 )
                 raise typer.Exit(1)
-            new_passphrase = getpass.getpass("New vault passphrase: ")
-            if not new_passphrase:
-                console.print("[red]Passphrase cannot be empty.[/red]")
-                raise typer.Exit(1)
-            confirm = getpass.getpass("Confirm new passphrase: ")
-            if new_passphrase != confirm:
-                console.print("[red]Passphrases do not match.[/red]")
-                raise typer.Exit(1)
+            new_passphrase = _prompt_new_passphrase("new vault")
 
     target_iters = KDF_ITERATIONS_CURRENT  # always re-encrypt at current default
 
@@ -987,17 +1015,7 @@ def import_env(
 
     # Interactive key picker in TTY mode (unless --yes)
     if _is_tty() and not yes:
-        # Preview keys without writing anything yet
-        candidates: list[tuple[str, str]] = []
-        for line in env_file.read_text().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if key and value and _is_valid_secret_name(key):
-                candidates.append((key, value))
+        candidates: list[tuple[str, str]] = list(iter_env_kv_pairs(env_file))
 
         if not candidates:
             console.print("[dim]No valid KEY=VALUE entries found to import.[/dim]")
@@ -1053,6 +1071,12 @@ def import_env(
         with VaultManager(vault_path, passphrase) as vm:
             count = _import_env_file_into_vault(env_file, env, vm)
 
+    audit.record(
+        "import",
+        vault_path=vault_path,
+        env=env,
+        extra={"source": str(env_file), "secrets_imported": count},
+    )
     console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
 
 
@@ -1271,21 +1295,7 @@ def share(
             console.print("[dim]Vault is empty; nothing to share.[/dim]")
         raise typer.Exit(1)
 
-    bundle_pp = os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE")
-    if bundle_pp is None:
-        if not _is_tty():
-            console.print(
-                "[red]Non-interactive run requires OWNLOCK_BUNDLE_PASSPHRASE.[/red]"
-            )
-            raise typer.Exit(1)
-        bundle_pp = getpass.getpass("Bundle passphrase: ")
-        if not bundle_pp:
-            console.print("[red]Bundle passphrase cannot be empty.[/red]")
-            raise typer.Exit(1)
-        confirm = getpass.getpass("Confirm bundle passphrase: ")
-        if bundle_pp != confirm:
-            console.print("[red]Passphrases do not match.[/red]")
-            raise typer.Exit(1)
+    bundle_pp = _resolve_bundle_passphrase(confirm=True)
 
     if _is_tty() and not yes and not os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE"):
         if not typer.confirm(
@@ -1347,17 +1357,7 @@ def import_share(
         console.print(f"[red]Bundle file not found: {bundle_file}[/red]")
         raise typer.Exit(1)
 
-    bundle_pp = os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE")
-    if bundle_pp is None:
-        if not _is_tty():
-            console.print(
-                "[red]Non-interactive run requires OWNLOCK_BUNDLE_PASSPHRASE.[/red]"
-            )
-            raise typer.Exit(1)
-        bundle_pp = getpass.getpass("Bundle passphrase: ")
-        if not bundle_pp:
-            console.print("[red]Bundle passphrase cannot be empty.[/red]")
-            raise typer.Exit(1)
+    bundle_pp = _resolve_bundle_passphrase(confirm=False)
 
     try:
         bundle_text = bundle_file.read_text(encoding="utf-8")

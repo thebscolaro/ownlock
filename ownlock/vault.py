@@ -143,15 +143,17 @@ class VaultManager:
         meta = self.get_meta()
         return int(meta.get("kdf_iterations", str(KDF_ITERATIONS_LEGACY)))
 
-    def set_meta(self, key: str, value: str) -> None:
-        """Upsert a single meta row."""
-        conn = self._require_conn()
-        conn.execute(
+    def _upsert_meta_row(self, key: str, value: str) -> None:
+        """Insert/update a single meta row inside the caller's transaction.
+
+        Private because callers must commit explicitly; ``rekey`` batches
+        several of these together and commits once at the end.
+        """
+        self._require_conn().execute(
             """INSERT INTO meta (key, value) VALUES (?, ?)
                ON CONFLICT (key) DO UPDATE SET value = ?""",
             (key, value, value),
         )
-        conn.commit()
 
     def set(self, name: str, value: str, env: str = "default") -> None:
         """Store or update a secret. New writes use the current KDF default."""
@@ -263,16 +265,8 @@ class VaultManager:
                     "WHERE name = ? AND env = ?",
                     (token, ts, name, env),
                 )
-            conn.execute(
-                """INSERT INTO meta (key, value) VALUES ('schema_version', ?)
-                   ON CONFLICT (key) DO UPDATE SET value = ?""",
-                (str(SCHEMA_VERSION_CURRENT), str(SCHEMA_VERSION_CURRENT)),
-            )
-            conn.execute(
-                """INSERT INTO meta (key, value) VALUES ('kdf_iterations', ?)
-                   ON CONFLICT (key) DO UPDATE SET value = ?""",
-                (str(target_iterations), str(target_iterations)),
-            )
+            self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
+            self._upsert_meta_row("kdf_iterations", str(target_iterations))
             conn.commit()
         except Exception:
             conn.rollback()

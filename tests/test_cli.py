@@ -441,35 +441,8 @@ class TestImport:
         assert "from-import" in result.output
 
 
-class TestDangerousScanRoot:
-    """_is_dangerous_scan_root — filesystem roots only (option c guard)."""
-
-    def test_project_subdirectory_not_dangerous(self, tmp_path):
-        from ownlock.cli import _is_dangerous_scan_root
-
-        d = tmp_path / "proj"
-        d.mkdir()
-        assert _is_dangerous_scan_root(d) is False
-
-    def test_posix_filesystem_root(self):
-        import sys
-
-        from ownlock.cli import _is_dangerous_scan_root
-
-        if sys.platform == "win32":
-            pytest.skip("POSIX root")
-        assert _is_dangerous_scan_root(Path("/")) is True
-
-    def test_windows_drive_root(self):
-        import os
-        import sys
-
-        from ownlock.cli import _is_dangerous_scan_root
-
-        if sys.platform != "win32":
-            pytest.skip("Windows only")
-        drive = Path(os.environ.get("SystemDrive", "C:") + "\\")
-        assert _is_dangerous_scan_root(drive) is True
+# Note: filesystem-root guard logic for `scan` lives in `ownlock.scanner.is_dangerous_scan_root`;
+# unit tests for that helper are in tests/test_scanner.py::TestDangerousScanRoot.
 
 
 class TestScan:
@@ -519,30 +492,9 @@ class TestScan:
         assert result.exit_code == 1
         assert "cancelled" in result.output.lower()
 
-    def test_scan_skips_oversized_files(self, tmp_path, seeded_vault):
-        """Files larger than --max-file-bytes are not read (leak in them is not detected)."""
-        big = tmp_path / "huge.txt"
-        big.write_text("x" * 500 + "my-value")
-        result = runner.invoke(app, ["scan", str(tmp_path), "--max-file-bytes", "100"])
-        assert result.exit_code == 0
-        assert "No leaked secrets found" in result.output
-
-
-class TestRewriteEnvLinesHelper:
-    """_rewrite_env_lines_to_vault_syntax — shared by auto and rewrite-env."""
-
-    def test_rewrites_matching_keys_preserves_comments_and_vault_lines(self):
-        from ownlock.cli import _rewrite_env_lines_to_vault_syntax
-
-        lines = ["# comment", "", "FOO=plain", 'BAR=vault("BAR")', "SKIP=keep"]
-        existing = {"FOO": "plain", "SKIP": "keep"}
-        out, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, "production")
-        assert changed == 2
-        joined = "\n".join(out)
-        assert 'FOO=vault("FOO", env="production")' in joined
-        assert 'SKIP=vault("SKIP", env="production")' in joined
-        assert "# comment" in joined
-        assert 'BAR=vault("BAR")' in joined
+# Note: --max-file-bytes / unit-level rewrite logic are covered by
+# tests/test_scanner.py::test_max_file_bytes_skips_oversized and
+# tests/test_envfile.py::test_rewrite_env_lines_to_vault_syntax.
 
 
 class TestRewriteEnv:

@@ -20,9 +20,12 @@ Schema (one JSON object per line, sorted keys for stable diffs):
       "actor": "ownlock"
     }
 
-Operations: ``init``, ``set``, ``delete``, ``rekey``, ``share``,
-``import-share``, ``bootstrap``, ``rewrite-env``, ``auto``. The CLI calls
-:func:`record` at the boundary so all of them flow through one place.
+Operations: ``init``, ``set``, ``delete``, ``import``, ``rekey``, ``share``,
+``import-share``, ``bootstrap``. The CLI calls :func:`record` at the
+boundary so all vault-state-changing commands flow through one place.
+Read-only commands (``get``, ``list``, ``run``, ``scan``, ``doctor``) and
+.env file rewrites that don't touch the vault (``rewrite-env``) are
+intentionally **not** logged.
 
 Failure mode: any IOError / permission error during logging is swallowed —
 ownlock will not fail a successful vault operation because the audit log
