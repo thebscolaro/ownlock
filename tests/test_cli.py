@@ -1,6 +1,7 @@
 """Tests for ownlock.cli — Typer CLI commands."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -402,8 +403,9 @@ class TestRewriteEnvLinesHelper:
 
 
 class TestRewriteEnv:
-    def test_rewrite_env_replaces_values_with_vault_calls(self, tmp_path, vault_db):
-        """rewrite-env rewrites keys present in the vault and creates a backup."""
+    def test_rewrite_env_replaces_values_with_vault_calls(self, tmp_path, vault_db, monkeypatch):
+        """rewrite-env rewrites keys present in the vault and creates a backup
+        under .ownlock/backups/ (gitignored)."""
         VaultManager.init_vault(vault_db, PASSPHRASE).close()
         env_file = tmp_path / ".env"
         env_file.write_text("FOO=one\nBAR=two\n# comment\n")
@@ -411,14 +413,40 @@ class TestRewriteEnv:
         with VaultManager(vault_db, PASSPHRASE) as vm:
             vm.set("FOO", "one")
 
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: vault_db),
+        )
+
         result = runner.invoke(app, ["rewrite-env", "-f", str(env_file), "--yes"])
         assert result.exit_code == 0
 
         text = env_file.read_text()
         assert 'FOO=vault("FOO")' in text
         assert "BAR=two" in text  # unchanged
-        backup = tmp_path / ".env.ownlock.bak"
-        assert backup.exists()
+
+        # Backup goes to .ownlock/backups/, not next to the .env file.
+        legacy_backup = tmp_path / ".env.ownlock.bak"
+        assert not legacy_backup.exists(), "must not write plaintext next to .env"
+        backups_dir = vault_db.parent / "backups"
+        assert backups_dir.exists()
+        backups = list(backups_dir.glob(".env.*.bak"))
+        assert len(backups) == 1, backups
+        assert backups[0].read_text() == "FOO=one\nBAR=two\n# comment\n"
+        if os.name == "posix":
+            mode = backups[0].stat().st_mode & 0o777
+            assert mode == 0o600
+
+    def test_scan_flags_legacy_plaintext_backups(self, tmp_path, vault_db, seeded_vault, monkeypatch):
+        """ownlock scan reports *.ownlock.bak files (legacy plaintext leak path)."""
+        legacy = tmp_path / ".env.ownlock.bak"
+        legacy.write_text("OLD_KEY=stale-value\n")
+
+        result = runner.invoke(app, ["scan", str(tmp_path)])
+        assert result.exit_code == 1
+        assert "legacy plaintext backup" in result.output.lower()
+        assert ".env.ownlock.bak" in result.output
 
 
 class TestAuto:

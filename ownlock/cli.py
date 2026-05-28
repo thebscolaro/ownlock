@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
 import re
+from datetime import datetime, UTC
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -110,6 +112,44 @@ def _is_tty() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except Exception:
         return False
+
+
+_LEGACY_BACKUP_SUFFIX = ".ownlock.bak"
+
+
+def _backup_dir_for(env_file: Path) -> Path:
+    """Pick the safe backup directory for *env_file*.
+
+    Backups contain the user's original plaintext .env values, so they go
+    under ``.ownlock/backups/`` which is covered by the default ``.ownlock/``
+    gitignore entry. Prefers the project vault's ``.ownlock`` directory when
+    one exists; otherwise falls back to ``<cwd>/.ownlock/backups``.
+    """
+    proj_vault = VaultManager.find_project_vault()
+    if proj_vault is not None:
+        return proj_vault.parent / "backups"
+    return Path.cwd() / PROJECT_VAULT_DIR / "backups"
+
+
+def _write_env_backup(env_file: Path, content: str) -> Path:
+    """Write *content* as a timestamped backup under ``.ownlock/backups/``.
+
+    Mode ``0600`` on POSIX. Ensures the parent ``.ownlock/`` directory is in
+    ``.gitignore`` before writing so the plaintext is never accidentally
+    committed.
+    """
+    _ensure_gitignore()
+    backup_dir = _backup_dir_for(env_file)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = backup_dir / f"{env_file.name}.{timestamp}.bak"
+    backup_path.write_text(content, encoding="utf-8")
+    if os.name == "posix":
+        try:
+            os.chmod(backup_path, 0o600)
+        except OSError:
+            pass
+    return backup_path
 
 
 def _import_env_file_into_vault(env_file: Path, env: str, vm: VaultManager) -> int:
@@ -950,8 +990,7 @@ def auto(
         )
         return
 
-    backup_path = rewrite_target.with_suffix(rewrite_target.suffix + ".ownlock.bak")
-    backup_path.write_text(original_text)
+    backup_path = _write_env_backup(rewrite_target, original_text)
     rewrite_target.write_text("\n".join(new_lines) + "\n")
     console.print(
         f"[green]Rewrote {changed} key(s) in {rewrite_target}. Backup saved to {backup_path}.[/green]"
@@ -995,8 +1034,7 @@ def rewrite_env(
             console.print("[dim]Rewrite cancelled.[/dim]")
             raise typer.Exit(1)
 
-    backup_path = env_file.with_suffix(env_file.suffix + ".ownlock.bak")
-    backup_path.write_text(original_text)
+    backup_path = _write_env_backup(env_file, original_text)
     env_file.write_text("\n".join(new_lines) + "\n")
     console.print(f"[green]Rewrote {changed} key(s) in {env_file}. Backup saved to {backup_path}.[/green]")
 
@@ -1058,6 +1096,7 @@ def scan(
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", ".ownlock", ".env"}
     skip_extensions = {".db", ".sqlite", ".pyc", ".whl", ".tar", ".gz", ".zip", ".png", ".jpg"}
     findings: list[tuple[str, int, str]] = []
+    legacy_backups: list[Path] = []
     files_scanned = 0
 
     for file_path in directory.rglob("*"):
@@ -1073,6 +1112,10 @@ def scan(
         if not file_path.is_file():
             continue
         if any(part in skip_dirs for part in file_path.parts):
+            continue
+        # Plaintext backup written by older ownlock versions; flag and skip.
+        if file_path.name.endswith(_LEGACY_BACKUP_SUFFIX):
+            legacy_backups.append(file_path)
             continue
         if file_path.suffix in skip_extensions:
             continue
@@ -1091,13 +1134,30 @@ def scan(
                 for i, line in enumerate(content.splitlines(), 1):
                     if secret_value in line:
                         findings.append((str(file_path), i, secret_name))
+
+    if legacy_backups:
+        console.print(
+            f"[red bold]Found {len(legacy_backups)} legacy plaintext backup file(s) "
+            "(*.ownlock.bak written next to the original .env):[/red bold]"
+        )
+        for p in legacy_backups:
+            console.print(f"  {p}")
+        console.print(
+            "[dim]Newer ownlock versions write backups under .ownlock/backups/ "
+            "(gitignored, mode 0600). Move or delete these files; if any were "
+            "committed, treat the values as exposed and rotate them.[/dim]"
+        )
+
     if findings:
         console.print(f"[red bold]Found {len(findings)} leaked secret(s):[/red bold]")
         for path, line_num, secret_name in findings:
             console.print(f"  {path}:{line_num} — contains value of [bold]{secret_name}[/bold]")
         raise typer.Exit(1)
-    else:
-        console.print("[green]No leaked secrets found.[/green]")
+    if legacy_backups:
+        # Legacy backups are themselves a finding even if scan didn't match the
+        # vault values (the vault may have moved on since the backup was written).
+        raise typer.Exit(1)
+    console.print("[green]No leaked secrets found.[/green]")
 
 
 OWNLOCK_GITIGNORE_ENTRY = (
