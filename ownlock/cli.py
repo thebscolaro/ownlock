@@ -5,7 +5,6 @@ from __future__ import annotations
 import getpass
 import json
 import os
-import re
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -26,7 +25,26 @@ from ownlock.backups import (
     write_env_backup as _write_env_backup_impl,
 )
 from ownlock.doctor import gather_doctor_state as _gather_doctor_state
+from ownlock.envfile import (
+    DEFAULT_ENV_FILE_CANDIDATES,
+    format_vault_expr,
+    import_env_file_into_vault as _import_env_file_into_vault,
+    iter_env_kv_pairs,
+    rewrite_env_lines_to_vault_syntax as _rewrite_env_lines_to_vault_syntax,
+)
 from ownlock.keyring_util import resolve_passphrase, store_passphrase
+from ownlock.paths import (
+    OWNLOCK_GITIGNORE_ENTRY,
+    SECRET_NAME_RE,
+    ensure_gitignore as _ensure_gitignore,
+    format_vault_path as _format_vault_path,
+    is_tty as _is_tty,
+    is_valid_secret_name as _is_valid_secret_name,
+    resolve_vault_path as _resolve_vault_path,
+    validate_env_file as _validate_env_file,
+    validate_scan_dir as _validate_scan_dir,
+    validate_secret_name as _validate_secret_name,
+)
 from ownlock.scanner import (
     DEFAULT_MAX_DEPTH as MAX_SCAN_DEPTH,
     DEFAULT_MAX_FILE_BYTES as MAX_SCAN_FILE_BYTES,
@@ -71,130 +89,15 @@ def _safe_command(fn: F) -> F:
     return wrapper  # type: ignore[return-value]
 
 
-def _format_vault_path(path: Path) -> str:
-    """Return a user-safe display path (e.g. ~/.ownlock/vault.db)."""
-    try:
-        resolved = path.resolve()
-        home = Path.home()
-        if resolved.is_relative_to(home):
-            return "~" + str(resolved)[len(str(home)) :]
-    except (OSError, RuntimeError):
-        pass
-    return str(path)
-
-
-def _validate_env_file(path: Path) -> Path:
-    """Resolve path; if relative, ensure under cwd."""
-    resolved = path.resolve()
-    if not path.is_absolute():
-        try:
-            resolved.relative_to(Path.cwd())
-        except ValueError:
-            console.print("[red]Path must be inside the current directory.[/red]")
-            raise typer.Exit(1)
-    return resolved
-
-
-def _validate_scan_dir(path: Path) -> Path:
-    """Resolve path; if relative, ensure under cwd."""
-    resolved = path.resolve()
-    if not path.is_absolute():
-        try:
-            resolved.relative_to(Path.cwd())
-        except ValueError:
-            console.print("[red]Directory must be inside the current directory.[/red]")
-            raise typer.Exit(1)
-    return resolved
-
-
-SECRET_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
-
-
-def _validate_secret_name(name: str) -> None:
-    """Reject names with path-like or invalid characters."""
-    if not SECRET_NAME_RE.match(name):
-        console.print("[red]Secret name must use only letters, numbers, hyphens, and underscores.[/red]")
-        raise typer.Exit(1)
-
-
-def _is_valid_secret_name(name: str) -> bool:
-    """Return True if name is valid (for non-fatal checks like import)."""
-    return bool(SECRET_NAME_RE.match(name))
-
-
-def _is_tty() -> bool:
-    """Return True if running in an interactive terminal."""
-    try:
-        import sys
-
-        return sys.stdin.isatty() and sys.stdout.isatty()
-    except Exception:
-        return False
-
-
 def _write_env_backup(env_file: Path, content: str) -> Path:
-    """Thin wrapper around :func:`ownlock.backups.write_env_backup` that pulls
-    in this module's gitignore-management. Existing call sites and tests still
-    reference ``cli._write_env_backup`` directly."""
+    """Thin wrapper around :func:`ownlock.backups.write_env_backup` that wires
+    in this module's gitignore helper. Existing call sites and tests still
+    reference ``cli._write_env_backup`` directly so this stays exported even
+    though the body has moved to ``ownlock.backups``.
+    """
     return _write_env_backup_impl(
         env_file, content, ensure_gitignore_fn=_ensure_gitignore
     )
-
-
-def _import_env_file_into_vault(env_file: Path, env: str, vm: VaultManager) -> int:
-    """Import KEY=VALUE pairs from env_file into the given vault manager."""
-    count = 0
-    for line in env_file.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if key and value and _is_valid_secret_name(key):
-            vm.set(key, value, env)
-            count += 1
-    return count
-
-
-def _rewrite_env_lines_to_vault_syntax(
-    lines: list[str],
-    existing: dict[str, str],
-    env: str,
-) -> tuple[list[str], int]:
-    """Rewrite env lines to use ``vault()`` for keys present in *existing*.
-
-    Skips comments, blank lines, invalid key names, lines already using ``vault()``,
-    and keys not in *existing*.
-    """
-    new_lines: list[str] = []
-    changed = 0
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            new_lines.append(line)
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        raw_value = value.strip()
-        if not _is_valid_secret_name(key):
-            new_lines.append(line)
-            continue
-        if raw_value.startswith("vault(\""):
-            new_lines.append(line)
-            continue
-        if key not in existing:
-            new_lines.append(line)
-            continue
-        if env == "default":
-            vault_expr = f'vault(\"{key}\")'
-        else:
-            vault_expr = f'vault(\"{key}\", env=\"{env}\")'
-        new_lines.append(f"{key}={vault_expr}")
-        changed += 1
-    return new_lines, changed
 
 
 app = typer.Typer(
@@ -1045,10 +948,7 @@ def export_env(
             rows = vm.list_secrets(env)
         for s in sorted(rows, key=lambda x: x["name"]):
             name = s["name"]
-            if env == "default":
-                typer.echo(f'{name}=vault("{name}")')
-            else:
-                typer.echo(f'{name}=vault("{name}", env="{env}")')
+            typer.echo(f"{name}={format_vault_expr(name, env)}")
         return
 
     env_file = _validate_env_file(env_file)
@@ -1569,7 +1469,7 @@ def bootstrap(
     else:
         candidates = [
             _validate_env_file(Path(name))
-            for name in (".env", ".env.local", ".env.development", ".env.production")
+            for name in DEFAULT_ENV_FILE_CANDIDATES
             if (Path.cwd() / name).exists()
         ]
 
@@ -1704,7 +1604,7 @@ def auto(
         candidate_files = [Path(f) for f in files]
     else:
         # Common env file names in current directory
-        candidate_files = [Path(".env"), Path(".env.local"), Path(".env.development"), Path(".env.production")]
+        candidate_files = [Path(name) for name in DEFAULT_ENV_FILE_CANDIDATES]
 
     valid_files: list[Path] = []
     for f in candidate_files:
@@ -1954,38 +1854,3 @@ def scan(
     console.print("[green]No leaked secrets found.[/green]")
 
 
-OWNLOCK_GITIGNORE_ENTRY = (
-    "\n# ownlock vault (never commit)\n.ownlock/\n"
-)
-
-
-def _ensure_gitignore() -> None:
-    """Add .ownlock/ to .gitignore if not already present."""
-    gitignore_path = Path.cwd() / ".gitignore"
-    if not gitignore_path.exists():
-        gitignore_path.write_text(
-            "# ownlock vault (never commit)\n.ownlock/\n",
-            encoding="utf-8",
-        )
-        console.print("[dim]Created .gitignore with .ownlock/[/dim]")
-        return
-
-    content = gitignore_path.read_text(encoding="utf-8")
-    if ".ownlock" in content:
-        return
-
-    with gitignore_path.open("a", encoding="utf-8") as f:
-        f.write(OWNLOCK_GITIGNORE_ENTRY)
-    console.print("[dim]Added .ownlock/ to .gitignore[/dim]")
-
-
-def _resolve_vault_path(global_vault: bool = False, project: bool = False) -> Path:
-    """Pick vault path. Default: project if found, else global. --global forces global."""
-    if global_vault:
-        return GLOBAL_VAULT_PATH
-    if project:
-        return Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
-    proj = VaultManager.find_project_vault()
-    if proj:
-        return proj
-    return GLOBAL_VAULT_PATH
