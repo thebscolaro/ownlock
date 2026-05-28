@@ -386,39 +386,214 @@ def list_secrets(
     console.print(table)
 
 
-@app.command("doctor")
-def doctor() -> None:
-    """Print environment diagnostics (versions, vault paths, no secret values)."""
-    import importlib.util
-    import os
-    import sys
+def _passphrase_source() -> str:
+    """Identify which source would resolve the passphrase right now.
 
-    from importlib.metadata import version as pkg_version
-
-    console.print(f"[bold]ownlock[/bold] {pkg_version('ownlock')}")
-    console.print(f"Python {sys.version.split()[0]} — {sys.executable}")
-    console.print(
-        f"Global vault: {GLOBAL_VAULT_PATH} — "
-        f"{'exists' if GLOBAL_VAULT_PATH.exists() else 'missing'}"
-    )
-    pv = VaultManager.find_project_vault()
-    if pv:
-        console.print(f"Project vault: {pv} — exists")
-    else:
-        console.print("Project vault: (none found from cwd)")
-
-    console.print(f"OWNLOCK_PASSPHRASE: {'set' if os.environ.get('OWNLOCK_PASSPHRASE') else 'not set'}")
-
+    Mirrors :func:`ownlock.keyring_util.resolve_passphrase`'s precedence
+    (env var > keyring > prompt) but does not return the value itself.
+    """
+    if os.environ.get("OWNLOCK_PASSPHRASE"):
+        return "env var"
     try:
         from ownlock.keyring_util import get_passphrase
 
-        stored = get_passphrase()
-        console.print(f"Keyring passphrase: {'stored' if stored else 'not stored'}")
+        if get_passphrase():
+            return "keyring"
     except Exception:
-        console.print("Keyring passphrase: unavailable (error reading keyring)")
+        return "keyring (unavailable)"
+    return "would prompt"
 
-    mcp_ok = importlib.util.find_spec("mcp.server.fastmcp") is not None
-    console.print(f"MCP package importable: {'yes' if mcp_ok else 'no'} (pip install 'ownlock[mcp]')")
+
+def _vault_health(vault_path: Path) -> dict[str, Any]:
+    """Return a dict describing a vault's existence + meta, no values exposed."""
+    from ownlock.crypto import KDF_ITERATIONS_CURRENT
+
+    info: dict[str, Any] = {
+        "path": str(vault_path),
+        "exists": vault_path.exists(),
+    }
+    if not info["exists"]:
+        return info
+    # Open without a passphrase by reading meta directly via SQLite. We avoid
+    # decrypting anything; meta rows are plaintext.
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(str(vault_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute("SELECT key, value FROM meta")
+            meta = {row["key"]: row["value"] for row in cursor.fetchall()}
+        except sqlite3.OperationalError:
+            meta = {}  # legacy vault without meta table
+        try:
+            secret_count = conn.execute("SELECT COUNT(*) AS n FROM secrets").fetchone()["n"]
+        except sqlite3.OperationalError:
+            secret_count = 0
+        conn.close()
+    except sqlite3.DatabaseError as e:
+        info["error"] = str(e)
+        return info
+
+    schema_version = int(meta.get("schema_version", "1"))
+    kdf_iterations = int(meta.get("kdf_iterations", "200000"))
+    info.update(
+        {
+            "schema_version": schema_version,
+            "kdf_algo": meta.get("kdf_algo", "PBKDF2-HMAC-SHA256"),
+            "kdf_iterations": kdf_iterations,
+            "kdf_stale": kdf_iterations < KDF_ITERATIONS_CURRENT,
+            "secret_count": secret_count,
+        }
+    )
+    return info
+
+
+def _gather_doctor_state() -> dict[str, Any]:
+    """Collect everything ``ownlock doctor`` reports, no secret values."""
+    import importlib.util
+    import sys
+    from importlib.metadata import version as pkg_version
+
+    pv = VaultManager.find_project_vault()
+    state: dict[str, Any] = {
+        "ownlock_version": pkg_version("ownlock"),
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "global_vault": _vault_health(GLOBAL_VAULT_PATH),
+        "project_vault": _vault_health(pv) if pv else {"path": None, "exists": False},
+        "ownlock_passphrase_env_set": bool(os.environ.get("OWNLOCK_PASSPHRASE")),
+        "passphrase_source": _passphrase_source(),
+        "mcp_importable": importlib.util.find_spec("mcp.server.fastmcp") is not None,
+    }
+    try:
+        from ownlock.keyring_util import get_passphrase
+
+        state["keyring_passphrase_stored"] = bool(get_passphrase())
+    except Exception as e:
+        state["keyring_passphrase_stored"] = None
+        state["keyring_error"] = str(e)
+
+    # Stale plaintext leftovers in cwd that ownlock scan would also flag.
+    cwd = Path.cwd()
+    stale_tmp: list[str] = []
+    legacy_baks: list[str] = []
+    try:
+        for path in cwd.rglob("*"):
+            if any(part in {".git", "node_modules", ".venv", ".ownlock"} for part in path.parts):
+                continue
+            if not path.is_file():
+                continue
+            if path.name.endswith(_LEGACY_BACKUP_SUFFIX):
+                legacy_baks.append(str(path))
+            elif path.name.startswith(".") and ".ownlock-tmp" in path.name:
+                stale_tmp.append(str(path))
+    except OSError:
+        pass
+    state["legacy_backups_in_cwd"] = legacy_baks
+    state["stale_render_tmp_files"] = stale_tmp
+
+    # .gitignore coverage (best-effort: just check the literal substring).
+    gitignore = cwd / ".gitignore"
+    if gitignore.exists():
+        try:
+            text = gitignore.read_text(encoding="utf-8", errors="ignore")
+            state["gitignore_covers_ownlock"] = ".ownlock" in text
+        except OSError:
+            state["gitignore_covers_ownlock"] = None
+    else:
+        state["gitignore_covers_ownlock"] = False
+
+    return state
+
+
+@app.command("doctor")
+def doctor(
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of human-readable output."
+    ),
+) -> None:
+    """Print environment diagnostics (versions, vault paths, no secret values)."""
+    from ownlock.crypto import KDF_ITERATIONS_CURRENT
+
+    state = _gather_doctor_state()
+
+    if as_json:
+        typer.echo(json.dumps(state, indent=2, default=str))
+        return
+
+    console.print(f"[bold]ownlock[/bold] {state['ownlock_version']}")
+    console.print(
+        f"Python {state['python_version']} — {state['python_executable']}"
+    )
+
+    def _fmt_vault(label: str, info: dict[str, Any]) -> None:
+        path = info.get("path")
+        if path is None:
+            console.print(f"{label}: (none found from cwd)")
+            return
+        if not info.get("exists"):
+            console.print(f"{label}: {path} — missing")
+            return
+        line = f"{label}: {path} — exists"
+        if "schema_version" in info:
+            line += f", schema v{info['schema_version']}"
+            line += f", {info['kdf_algo']} {info['kdf_iterations']:,} iters"
+            if info.get("kdf_stale"):
+                line += "  [yellow](stale)[/yellow]"
+            line += f", {info['secret_count']} secret(s)"
+        console.print(line)
+
+    _fmt_vault("Global vault", state["global_vault"])
+    _fmt_vault("Project vault", state["project_vault"])
+
+    console.print(
+        f"OWNLOCK_PASSPHRASE: {'set' if state['ownlock_passphrase_env_set'] else 'not set'}"
+    )
+    keyring_state = state.get("keyring_passphrase_stored")
+    if keyring_state is None:
+        console.print("Keyring passphrase: unavailable (error reading keyring)")
+    else:
+        console.print(
+            f"Keyring passphrase: {'stored' if keyring_state else 'not stored'}"
+        )
+    console.print(f"Passphrase resolved from: {state['passphrase_source']}")
+
+    if state["legacy_backups_in_cwd"]:
+        console.print(
+            f"[yellow]Legacy plaintext backups (*.ownlock.bak) found:[/yellow] "
+            f"{len(state['legacy_backups_in_cwd'])} — move or delete these "
+            f"(run [bold]ownlock scan[/bold] for details)."
+        )
+    if state["stale_render_tmp_files"]:
+        console.print(
+            f"[yellow]Stale render temp files (.ownlock-tmp) found:[/yellow] "
+            f"{len(state['stale_render_tmp_files'])} — delete these manually."
+        )
+
+    if state["gitignore_covers_ownlock"] is False:
+        console.print(
+            "[yellow].gitignore does not cover .ownlock/ — run "
+            "[bold]ownlock init[/bold] in this directory or add the entry "
+            "manually.[/yellow]"
+        )
+
+    # Suggest rekey when KDF is below current default.
+    stale_globally = state["global_vault"].get("kdf_stale")
+    stale_project = state["project_vault"].get("kdf_stale")
+    if stale_globally or stale_project:
+        target_flag = "--global" if stale_globally and not stale_project else "--project"
+        console.print(
+            f"[dim]Tip: this vault uses KDF iterations below the current "
+            f"default ({KDF_ITERATIONS_CURRENT:,}). Run "
+            f"[bold]ownlock rekey --upgrade-kdf {target_flag} --yes[/bold] to "
+            "upgrade.[/dim]"
+        )
+
+    console.print(
+        f"MCP package importable: {'yes' if state['mcp_importable'] else 'no'} "
+        "(pip install 'ownlock[mcp]')"
+    )
 
 
 def _backup_vault_file(vault_path: Path) -> Path:

@@ -218,6 +218,7 @@ class TestList:
 class TestDoctor:
     def test_doctor_prints_diagnostics(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", tmp_path / "g" / "vault.db")
         monkeypatch.setattr(
             "ownlock.vault.VaultManager.find_project_vault",
@@ -231,6 +232,90 @@ class TestDoctor:
         assert "OWNLOCK_PASSPHRASE" in out
         assert "Global vault" in out
         assert "Project vault" in out
+        assert "Passphrase resolved from" in out
+
+    def test_doctor_reports_passphrase_source_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", tmp_path / "g" / "vault.db")
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "env var" in result.output
+
+    def test_doctor_reports_passphrase_source_keyring(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", tmp_path / "g" / "vault.db")
+        monkeypatch.setattr(
+            "ownlock.keyring_util.get_passphrase", lambda: "stored-pp"
+        )
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "keyring" in result.output
+
+    def test_doctor_json_output(self, tmp_path, monkeypatch, vault_db, seeded_vault):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: vault_db),
+        )
+        result = runner.invoke(app, ["doctor", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert "ownlock_version" in data
+        assert "global_vault" in data
+        assert data["global_vault"]["exists"] is True
+        assert data["global_vault"]["schema_version"] == 2
+        assert data["global_vault"]["secret_count"] == 1
+        assert data["passphrase_source"] in {"env var", "keyring", "would prompt"}
+
+    def test_doctor_flags_legacy_backups_and_stale_tmp(self, tmp_path, monkeypatch, vault_db, seeded_vault):
+        legacy = tmp_path / ".env.ownlock.bak"
+        legacy.write_text("FOO=bar")
+        stale = tmp_path / ".web.config.abc.ownlock-tmp"
+        stale.write_text("partial")
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "Legacy plaintext backups" in result.output
+        assert "Stale render temp files" in result.output
+
+    def test_doctor_warns_when_gitignore_missing_ownlock(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".gitignore").write_text("node_modules/\n")
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", tmp_path / "g" / "vault.db")
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert ".ownlock" in result.output
+        assert "does not cover" in result.output
+
+    def test_doctor_recommends_rekey_for_legacy_vault(self, tmp_path, monkeypatch):
+        """A vault file without meta (legacy) reports stale and surfaces rekey tip."""
+        import sqlite3 as _sql
+
+        legacy_db = tmp_path / "legacy.db"
+        conn = _sql.connect(str(legacy_db))
+        conn.execute(
+            "CREATE TABLE secrets ("
+            "  name TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'default', "
+            "  value_enc TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "  updated_at TEXT NOT NULL, PRIMARY KEY (name, env))"
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", legacy_db)
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: None),
+        )
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "rekey --upgrade-kdf" in result.output
 
 
 class TestDelete:
