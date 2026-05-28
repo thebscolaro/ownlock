@@ -9,6 +9,21 @@ import sys
 import threading
 from typing import IO
 
+# Environment variables that ownlock uses to drive its own decrypt path. These
+# must NEVER be inherited by commands launched via ``ownlock run``: the master
+# passphrase would let the child re-spawn ownlock and decrypt the entire vault.
+# Resolved secret values from .env still flow through (they're added to the
+# child env after these are stripped).
+_OWNLOCK_INTERNAL_ENV_VARS = frozenset({
+    "OWNLOCK_PASSPHRASE",
+    "OWNLOCK_NEW_PASSPHRASE",
+})
+
+
+def _sanitize_parent_env(parent: dict[str, str]) -> dict[str, str]:
+    """Return *parent* env with ownlock-internal variables removed."""
+    return {k: v for k, v in parent.items() if k not in _OWNLOCK_INTERNAL_ENV_VARS}
+
 
 def _resolve_cmd_for_subprocess(cmd: list[str], merged_env: dict[str, str]) -> list[str]:
     """Copy *cmd*; on Windows resolve argv0 via PATH/PATHEXT (e.g. ``npm`` → ``npm.cmd``)."""
@@ -62,7 +77,7 @@ class SecretRedactor:
         with :func:`shutil.which` on ``cmd[0]`` using the merged ``PATH`` so
         bare names like ``npm`` match ``npm.cmd``.
         """
-        merged_env = {**os.environ, **env}
+        merged_env = {**_sanitize_parent_env(os.environ), **env}
         cmd_resolved = _resolve_cmd_for_subprocess(cmd, merged_env)
 
         proc = subprocess.Popen(
