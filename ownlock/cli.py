@@ -6,7 +6,6 @@ import getpass
 import json
 import os
 import re
-from datetime import datetime, UTC
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -15,7 +14,25 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+# Re-export module-level helpers under the cli namespace so existing tests that
+# monkeypatch ``ownlock.cli._is_tty`` / ``ownlock.cli._resolve_vault_path`` /
+# ``ownlock.cli._write_env_backup`` keep working without each test learning
+# about the new module layout.
+from ownlock.backups import (
+    LEGACY_BACKUP_SUFFIX as _LEGACY_BACKUP_SUFFIX,
+    backup_dir_for as _backup_dir_for,
+    backup_vault_file as _backup_vault_file,
+    write_env_backup as _write_env_backup_impl,
+)
+from ownlock.doctor import gather_doctor_state as _gather_doctor_state
 from ownlock.keyring_util import resolve_passphrase, store_passphrase
+from ownlock.scanner import (
+    DEFAULT_MAX_DEPTH as MAX_SCAN_DEPTH,
+    DEFAULT_MAX_FILE_BYTES as MAX_SCAN_FILE_BYTES,
+    DEFAULT_MAX_FILES as MAX_SCAN_FILES,
+    is_dangerous_scan_root as _is_dangerous_scan_root,
+    scan_directory,
+)
 from ownlock.vault import VaultManager, GLOBAL_VAULT_PATH, PROJECT_VAULT_DIR, PROJECT_VAULT_DB
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -114,42 +131,13 @@ def _is_tty() -> bool:
         return False
 
 
-_LEGACY_BACKUP_SUFFIX = ".ownlock.bak"
-
-
-def _backup_dir_for(env_file: Path) -> Path:
-    """Pick the safe backup directory for *env_file*.
-
-    Backups contain the user's original plaintext .env values, so they go
-    under ``.ownlock/backups/`` which is covered by the default ``.ownlock/``
-    gitignore entry. Prefers the project vault's ``.ownlock`` directory when
-    one exists; otherwise falls back to ``<cwd>/.ownlock/backups``.
-    """
-    proj_vault = VaultManager.find_project_vault()
-    if proj_vault is not None:
-        return proj_vault.parent / "backups"
-    return Path.cwd() / PROJECT_VAULT_DIR / "backups"
-
-
 def _write_env_backup(env_file: Path, content: str) -> Path:
-    """Write *content* as a timestamped backup under ``.ownlock/backups/``.
-
-    Mode ``0600`` on POSIX. Ensures the parent ``.ownlock/`` directory is in
-    ``.gitignore`` before writing so the plaintext is never accidentally
-    committed.
-    """
-    _ensure_gitignore()
-    backup_dir = _backup_dir_for(env_file)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = backup_dir / f"{env_file.name}.{timestamp}.bak"
-    backup_path.write_text(content, encoding="utf-8")
-    if os.name == "posix":
-        try:
-            os.chmod(backup_path, 0o600)
-        except OSError:
-            pass
-    return backup_path
+    """Thin wrapper around :func:`ownlock.backups.write_env_backup` that pulls
+    in this module's gitignore-management. Existing call sites and tests still
+    reference ``cli._write_env_backup`` directly."""
+    return _write_env_backup_impl(
+        env_file, content, ensure_gitignore_fn=_ensure_gitignore
+    )
 
 
 def _import_env_file_into_vault(env_file: Path, env: str, vm: VaultManager) -> int:
@@ -470,127 +458,6 @@ def list_secrets(
     console.print(table)
 
 
-def _passphrase_source() -> str:
-    """Identify which source would resolve the passphrase right now.
-
-    Mirrors :func:`ownlock.keyring_util.resolve_passphrase`'s precedence
-    (env var > keyring > prompt) but does not return the value itself.
-    """
-    if os.environ.get("OWNLOCK_PASSPHRASE"):
-        return "env var"
-    try:
-        from ownlock.keyring_util import get_passphrase
-
-        if get_passphrase():
-            return "keyring"
-    except Exception:
-        return "keyring (unavailable)"
-    return "would prompt"
-
-
-def _vault_health(vault_path: Path) -> dict[str, Any]:
-    """Return a dict describing a vault's existence + meta, no values exposed."""
-    from ownlock.crypto import KDF_ITERATIONS_CURRENT
-
-    info: dict[str, Any] = {
-        "path": str(vault_path),
-        "exists": vault_path.exists(),
-    }
-    if not info["exists"]:
-        return info
-    # Open without a passphrase by reading meta directly via SQLite. We avoid
-    # decrypting anything; meta rows are plaintext.
-    import sqlite3
-
-    try:
-        conn = sqlite3.connect(str(vault_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            cursor = conn.execute("SELECT key, value FROM meta")
-            meta = {row["key"]: row["value"] for row in cursor.fetchall()}
-        except sqlite3.OperationalError:
-            meta = {}  # legacy vault without meta table
-        try:
-            secret_count = conn.execute("SELECT COUNT(*) AS n FROM secrets").fetchone()["n"]
-        except sqlite3.OperationalError:
-            secret_count = 0
-        conn.close()
-    except sqlite3.DatabaseError as e:
-        info["error"] = str(e)
-        return info
-
-    schema_version = int(meta.get("schema_version", "1"))
-    kdf_iterations = int(meta.get("kdf_iterations", "200000"))
-    info.update(
-        {
-            "schema_version": schema_version,
-            "kdf_algo": meta.get("kdf_algo", "PBKDF2-HMAC-SHA256"),
-            "kdf_iterations": kdf_iterations,
-            "kdf_stale": kdf_iterations < KDF_ITERATIONS_CURRENT,
-            "secret_count": secret_count,
-        }
-    )
-    return info
-
-
-def _gather_doctor_state() -> dict[str, Any]:
-    """Collect everything ``ownlock doctor`` reports, no secret values."""
-    import importlib.util
-    import sys
-    from importlib.metadata import version as pkg_version
-
-    pv = VaultManager.find_project_vault()
-    state: dict[str, Any] = {
-        "ownlock_version": pkg_version("ownlock"),
-        "python_version": sys.version.split()[0],
-        "python_executable": sys.executable,
-        "global_vault": _vault_health(GLOBAL_VAULT_PATH),
-        "project_vault": _vault_health(pv) if pv else {"path": None, "exists": False},
-        "ownlock_passphrase_env_set": bool(os.environ.get("OWNLOCK_PASSPHRASE")),
-        "passphrase_source": _passphrase_source(),
-        "mcp_importable": importlib.util.find_spec("mcp.server.fastmcp") is not None,
-    }
-    try:
-        from ownlock.keyring_util import get_passphrase
-
-        state["keyring_passphrase_stored"] = bool(get_passphrase())
-    except Exception as e:
-        state["keyring_passphrase_stored"] = None
-        state["keyring_error"] = str(e)
-
-    # Stale plaintext leftovers in cwd that ownlock scan would also flag.
-    cwd = Path.cwd()
-    stale_tmp: list[str] = []
-    legacy_baks: list[str] = []
-    try:
-        for path in cwd.rglob("*"):
-            if any(part in {".git", "node_modules", ".venv", ".ownlock"} for part in path.parts):
-                continue
-            if not path.is_file():
-                continue
-            if path.name.endswith(_LEGACY_BACKUP_SUFFIX):
-                legacy_baks.append(str(path))
-            elif path.name.startswith(".") and ".ownlock-tmp" in path.name:
-                stale_tmp.append(str(path))
-    except OSError:
-        pass
-    state["legacy_backups_in_cwd"] = legacy_baks
-    state["stale_render_tmp_files"] = stale_tmp
-
-    # .gitignore coverage (best-effort: just check the literal substring).
-    gitignore = cwd / ".gitignore"
-    if gitignore.exists():
-        try:
-            text = gitignore.read_text(encoding="utf-8", errors="ignore")
-            state["gitignore_covers_ownlock"] = ".ownlock" in text
-        except OSError:
-            state["gitignore_covers_ownlock"] = None
-    else:
-        state["gitignore_covers_ownlock"] = False
-
-    return state
-
-
 @app.command("doctor")
 def doctor(
     as_json: bool = typer.Option(
@@ -678,27 +545,6 @@ def doctor(
         f"MCP package importable: {'yes' if state['mcp_importable'] else 'no'} "
         "(pip install 'ownlock[mcp]')"
     )
-
-
-def _backup_vault_file(vault_path: Path) -> Path:
-    """Copy *vault_path* to ``.ownlock/backups/vault.db.backup-<UTC>`` (mode 0600).
-
-    Used by ``rekey`` so a partial / failed rekey can never corrupt the live
-    vault: the live file is untouched until the SQL transaction commits, and
-    the backup copy is left in place after success for the user to delete
-    once they're confident.
-    """
-    backup_dir = vault_path.parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = backup_dir / f"{vault_path.name}.backup-{timestamp}"
-    backup_path.write_bytes(vault_path.read_bytes())
-    if os.name == "posix":
-        try:
-            os.chmod(backup_path, 0o600)
-        except OSError:
-            pass
-    return backup_path
 
 
 @app.command("rekey")
@@ -1996,23 +1842,6 @@ def rewrite_env(
     console.print(f"[green]Rewrote {changed} key(s) in {env_file}. Backup saved to {backup_path}.[/green]")
 
 
-MAX_SCAN_FILES = 10_000
-MAX_SCAN_DEPTH = 20
-MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024  # 2 MiB — skip huge files before read_text
-
-
-def _is_dangerous_scan_root(directory: Path) -> bool:
-    """True when the scan root is a filesystem root (Unix ``/`` or a Windows drive root like ``C:\\``)."""
-    try:
-        resolved = directory.resolve()
-    except (OSError, RuntimeError):
-        return False
-    # Windows drive roots and POSIX `/` satisfy `path == path.parent`.
-    if resolved == resolved.parent:
-        return True
-    return resolved == Path("/")
-
-
 @app.command()
 @_safe_command
 def scan(
@@ -2033,13 +1862,14 @@ def scan(
     directory = _validate_scan_dir(directory)
 
     if _is_tty() and not yes:
-        # Prompt only for dangerous roots or when --max-files exceeds the default cap.
+        # Prompt only for filesystem roots or when --max-files exceeds the default cap.
         if _is_dangerous_scan_root(directory) or max_files > MAX_SCAN_FILES:
             if not typer.confirm(
                 f"You're about to scan up to {max_files} files under {directory}. Continue?", default=False
             ):
                 console.print("[dim]Scan cancelled.[/dim]")
                 raise typer.Exit(1)
+
     passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
@@ -2050,54 +1880,20 @@ def scan(
         console.print("[dim]No secrets in vault to scan for.[/dim]")
         return
 
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", ".ownlock", ".env"}
-    skip_extensions = {".db", ".sqlite", ".pyc", ".whl", ".tar", ".gz", ".zip", ".png", ".jpg"}
-    findings: list[tuple[str, int, str]] = []
-    legacy_backups: list[Path] = []
-    files_scanned = 0
+    result = scan_directory(
+        directory,
+        all_secrets,
+        max_files=max_files,
+        max_depth=max_depth,
+        max_file_bytes=max_file_bytes,
+    )
 
-    for file_path in directory.rglob("*"):
-        if files_scanned >= max_files:
-            break
-        try:
-            rel = file_path.relative_to(directory)
-            depth = len(rel.parts) - 1 if rel.parts else 0  # dir depth (exclude filename)
-        except ValueError:
-            depth = 0
-        if depth > max_depth:
-            continue
-        if not file_path.is_file():
-            continue
-        if any(part in skip_dirs for part in file_path.parts):
-            continue
-        # Plaintext backup written by older ownlock versions; flag and skip.
-        if file_path.name.endswith(_LEGACY_BACKUP_SUFFIX):
-            legacy_backups.append(file_path)
-            continue
-        if file_path.suffix in skip_extensions:
-            continue
-        try:
-            if file_path.stat().st_size > max_file_bytes:
-                continue
-        except OSError:
-            continue
-        files_scanned += 1
-        try:
-            content = file_path.read_text(errors="ignore")
-        except (OSError, UnicodeDecodeError):
-            continue
-        for secret_name, secret_value in all_secrets.items():
-            if secret_value and secret_value in content:
-                for i, line in enumerate(content.splitlines(), 1):
-                    if secret_value in line:
-                        findings.append((str(file_path), i, secret_name))
-
-    if legacy_backups:
+    if result.legacy_backups:
         console.print(
-            f"[red bold]Found {len(legacy_backups)} legacy plaintext backup file(s) "
+            f"[red bold]Found {len(result.legacy_backups)} legacy plaintext backup file(s) "
             "(*.ownlock.bak written next to the original .env):[/red bold]"
         )
-        for p in legacy_backups:
+        for p in result.legacy_backups:
             console.print(f"  {p}")
         console.print(
             "[dim]Newer ownlock versions write backups under .ownlock/backups/ "
@@ -2105,14 +1901,17 @@ def scan(
             "committed, treat the values as exposed and rotate them.[/dim]"
         )
 
-    if findings:
-        console.print(f"[red bold]Found {len(findings)} leaked secret(s):[/red bold]")
-        for path, line_num, secret_name in findings:
-            console.print(f"  {path}:{line_num} — contains value of [bold]{secret_name}[/bold]")
+    if result.findings:
+        console.print(f"[red bold]Found {len(result.findings)} leaked secret(s):[/red bold]")
+        for finding in result.findings:
+            console.print(
+                f"  {finding.path}:{finding.line_number} — contains value of "
+                f"[bold]{finding.secret_name}[/bold]"
+            )
         raise typer.Exit(1)
-    if legacy_backups:
-        # Legacy backups are themselves a finding even if scan didn't match the
-        # vault values (the vault may have moved on since the backup was written).
+    if result.legacy_backups:
+        # Legacy backups alone are still a finding worth blocking on, even if
+        # no current vault value matched (the vault may have rotated since).
         raise typer.Exit(1)
     console.print("[green]No leaked secrets found.[/green]")
 

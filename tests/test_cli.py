@@ -366,6 +366,7 @@ class TestDoctor:
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", legacy_db)
+        monkeypatch.setattr("ownlock.vault.GLOBAL_VAULT_PATH", legacy_db)
         monkeypatch.setattr(
             "ownlock.vault.VaultManager.find_project_vault",
             staticmethod(lambda: None),

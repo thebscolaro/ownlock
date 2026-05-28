@@ -210,17 +210,6 @@ class VaultManager:
         ).fetchall()
         return {row["name"]: decrypt(row["value_enc"], self._passphrase) for row in rows}
 
-    def iter_all_encrypted(self) -> list[dict[str, str]]:
-        """Return every (name, env, value_enc) row across all envs.
-
-        Used by ``rekey`` to walk the entire vault. Values are not decrypted.
-        """
-        conn = self._require_conn()
-        rows = conn.execute(
-            "SELECT name, env, value_enc FROM secrets ORDER BY env, name"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
     def secret_iterations_summary(self) -> dict[int, int]:
         """Return a histogram of KDF iterations across stored ciphertexts.
 
