@@ -655,6 +655,75 @@ class TestRun:
         assert "[REDACTED:" in result.output or result.exit_code == 0
 
 
+class TestInstallHook:
+    """ownlock install-hook: pre-commit framework + raw git hook modes."""
+
+    def test_writes_git_hook_when_no_pre_commit_config(self, tmp_path, monkeypatch):
+        (tmp_path / ".git" / "hooks").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["install-hook"])
+        assert result.exit_code == 0, result.output
+        hook = tmp_path / ".git" / "hooks" / "pre-commit"
+        assert hook.exists()
+        assert "ownlock scan" in hook.read_text()
+        if os.name == "posix":
+            assert hook.stat().st_mode & 0o111, "git hook must be executable"
+
+    def test_appends_to_pre_commit_config(self, tmp_path, monkeypatch):
+        config = tmp_path / ".pre-commit-config.yaml"
+        config.write_text("repos:\n  - repo: meta\n    hooks: []\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["install-hook"])
+        assert result.exit_code == 0, result.output
+        text = config.read_text()
+        assert "id: ownlock-scan" in text
+        assert "ownlock scan ." in text
+        # Existing entries preserved
+        assert "id: meta" not in text  # original was just "- repo: meta", check still there
+        assert "- repo: meta" in text
+
+    def test_force_overwrites_existing_git_hook(self, tmp_path, monkeypatch):
+        hooks_dir = tmp_path / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        hook = hooks_dir / "pre-commit"
+        hook.write_text("#!/bin/sh\necho previous\n")
+        monkeypatch.chdir(tmp_path)
+
+        # Without --force: refuses
+        result = runner.invoke(app, ["install-hook", "--git-hook"])
+        assert result.exit_code == 0
+        assert "already exists" in result.output
+        assert "echo previous" in hook.read_text()
+
+        # With --force: overwrites
+        result = runner.invoke(app, ["install-hook", "--git-hook", "--force"])
+        assert result.exit_code == 0
+        assert "ownlock scan" in hook.read_text()
+
+    def test_idempotent_pre_commit_yaml(self, tmp_path, monkeypatch):
+        config = tmp_path / ".pre-commit-config.yaml"
+        config.write_text("repos:\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["install-hook"])
+        assert result.exit_code == 0
+
+        first = config.read_text()
+        result = runner.invoke(app, ["install-hook"])
+        assert result.exit_code == 0
+        assert "already present" in result.output
+        # Running twice should not duplicate the block.
+        assert config.read_text() == first
+
+    def test_no_git_repo_clean_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["install-hook", "--git-hook"])
+        assert result.exit_code == 1
+        assert "Not in a git repository" in result.output
+
+
 class TestCompletion:
     """ownlock completion: prints non-empty script for each supported shell."""
 

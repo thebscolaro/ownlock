@@ -1356,6 +1356,107 @@ def completion(
     typer.echo(inst.source())
 
 
+_GIT_HOOK_TEMPLATE = """#!/usr/bin/env bash
+# Installed by `ownlock install-hook`.
+# Runs `ownlock scan` to refuse commits containing leaked vault values.
+set -e
+exec ownlock scan .
+"""
+
+
+_PRE_COMMIT_SNIPPET = """  - repo: local
+    hooks:
+      - id: ownlock-scan
+        name: ownlock scan
+        entry: ownlock scan .
+        language: system
+        pass_filenames: false
+"""
+
+
+@app.command("install-hook")
+@_safe_command
+def install_hook(
+    git_hook: bool = typer.Option(
+        False,
+        "--git-hook",
+        help="Write a raw .git/hooks/pre-commit script (default if no .pre-commit-config.yaml exists).",
+    ),
+    pre_commit: bool = typer.Option(
+        False,
+        "--pre-commit",
+        help="Append the ownlock-scan snippet to .pre-commit-config.yaml.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing pre-commit hook."
+    ),
+) -> None:
+    """Install a pre-commit hook that runs ``ownlock scan`` before every commit.
+
+    Auto-detects: if a ``.pre-commit-config.yaml`` exists, appends an
+    ``ownlock-scan`` repo block to it; otherwise writes
+    ``.git/hooks/pre-commit``. Pass ``--git-hook`` or ``--pre-commit`` to
+    force one mode.
+    """
+    cwd = Path.cwd()
+    pre_commit_yaml = cwd / ".pre-commit-config.yaml"
+    git_dir = cwd / ".git"
+
+    if pre_commit and git_hook:
+        console.print("[red]--pre-commit and --git-hook are mutually exclusive.[/red]")
+        raise typer.Exit(1)
+
+    use_pre_commit = pre_commit or (not git_hook and pre_commit_yaml.exists())
+
+    if use_pre_commit:
+        if not pre_commit_yaml.exists():
+            pre_commit_yaml.write_text("repos:\n", encoding="utf-8")
+        text = pre_commit_yaml.read_text(encoding="utf-8")
+        if "id: ownlock-scan" in text and not force:
+            console.print(
+                "[yellow]ownlock-scan hook already present in "
+                f"{pre_commit_yaml}; pass --force to add another.[/yellow]"
+            )
+            return
+        if not text.endswith("\n"):
+            text += "\n"
+        if "repos:" not in text:
+            text = "repos:\n" + text
+        text += _PRE_COMMIT_SNIPPET
+        pre_commit_yaml.write_text(text, encoding="utf-8")
+        console.print(
+            f"[green]Added ownlock-scan to {pre_commit_yaml}.[/green] "
+            "[dim]Run [bold]pre-commit install[/bold] to enable.[/dim]"
+        )
+        return
+
+    # Raw git hook path.
+    if not git_dir.exists():
+        console.print(
+            "[red]Not in a git repository (no .git/ found in cwd). "
+            "Initialize git first or pass --pre-commit if you use the "
+            "pre-commit framework.[/red]"
+        )
+        raise typer.Exit(1)
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hook_path = hooks_dir / "pre-commit"
+    if hook_path.exists() and not force:
+        console.print(
+            f"[yellow]{hook_path} already exists; pass --force to overwrite.[/yellow]"
+        )
+        return
+
+    hook_path.write_text(_GIT_HOOK_TEMPLATE, encoding="utf-8")
+    if os.name == "posix":
+        try:
+            os.chmod(hook_path, 0o755)
+        except OSError:
+            pass
+    console.print(f"[green]Wrote {hook_path} (runs `ownlock scan .` on every commit).[/green]")
+
+
 @app.command("share")
 @_safe_command
 def share(
