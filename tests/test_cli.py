@@ -655,6 +655,27 @@ class TestRun:
         assert "[REDACTED:" in result.output or result.exit_code == 0
 
 
+class TestCompletion:
+    """ownlock completion: prints non-empty script for each supported shell."""
+
+    @pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "pwsh"])
+    def test_completion_prints_script(self, shell):
+        result = runner.invoke(app, ["completion", shell])
+        assert result.exit_code == 0, result.output
+        assert "ownlock" in result.output.lower()
+        assert "_OWNLOCK_COMPLETE" in result.output
+
+    def test_completion_powershell_alias(self):
+        a = runner.invoke(app, ["completion", "pwsh"]).output
+        b = runner.invoke(app, ["completion", "powershell"]).output
+        assert a == b
+
+    def test_completion_unsupported_shell(self):
+        result = runner.invoke(app, ["completion", "cmd"])
+        assert result.exit_code == 1
+        assert "Unsupported" in result.output
+
+
 class TestBootstrap:
     """ownlock bootstrap: fill in missing vault() references for new teammates."""
 

@@ -1298,6 +1298,64 @@ def import_env(
     console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
 
 
+_COMPLETION_SHELLS = {"bash", "zsh", "fish", "pwsh", "powershell"}
+
+
+@app.command("completion")
+def completion(
+    shell: str = typer.Argument(
+        ...,
+        help="Shell to generate completion for: bash, zsh, fish, pwsh.",
+    ),
+) -> None:
+    """Print a shell completion script.
+
+    Source the output to enable tab-completion of ownlock subcommands and
+    options. Examples:
+
+    \b
+    Bash:        eval "$(ownlock completion bash)"
+    Zsh:         eval "$(ownlock completion zsh)"
+    Fish:        ownlock completion fish | source
+    PowerShell:  ownlock completion pwsh | Out-String | Invoke-Expression
+
+    cmd.exe is not supported (no installable-completion framework). Windows
+    users on cmd retain full ownlock functionality, just without
+    autocomplete.
+    """
+    shell_norm = shell.lower()
+    # Accept "powershell" as an alias for "pwsh" since users may type either.
+    if shell_norm == "powershell":
+        shell_norm = "pwsh"
+    if shell_norm not in {"bash", "zsh", "fish", "pwsh"}:
+        console.print(
+            f"[red]Unsupported shell '{shell}'. "
+            "Supported: bash, zsh, fish, pwsh.[/red]"
+        )
+        raise typer.Exit(1)
+
+    # Click's shell_completion expects "powershell" as its name even though
+    # we accept "pwsh" on the command line for ergonomics.
+    click_shell = "powershell" if shell_norm == "pwsh" else shell_norm
+
+    from click.shell_completion import get_completion_class
+    from typer.main import get_command
+
+    klass = get_completion_class(click_shell)
+    if klass is None:
+        console.print(f"[red]No completion class available for {shell_norm}.[/red]")
+        raise typer.Exit(1)
+
+    cli = get_command(app)
+    inst = klass(
+        cli=cli,
+        ctx_args={},
+        prog_name="ownlock",
+        complete_var="_OWNLOCK_COMPLETE",
+    )
+    typer.echo(inst.source())
+
+
 @app.command("share")
 @_safe_command
 def share(
