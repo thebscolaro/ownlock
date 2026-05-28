@@ -33,16 +33,14 @@ import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from ownlock.resolver import VaultLookup
+from ownlock.resolver import VaultLookup, parse_vault_kwargs
 
 # Outer match: {{ vault( "name" [ , ARGS ] ) }}
-# ARGS is captured as a single blob and parsed by _KWARG_RE below so kwargs
-# may appear in any order and we can add new kwargs without touching the regex.
+# ARGS is captured as a single blob and parsed by parse_vault_kwargs (shared
+# with ownlock.resolver) so kwargs may appear in any order and `.env` and
+# template references accept identical syntax.
 _TEMPLATE_RE = re.compile(
     r'\{\{\s*vault\(\s*"([^"]+)"\s*(?:,\s*([^)]+?))?\s*\)\s*\}\}'
-)
-_KWARG_RE = re.compile(
-    r'(\w+)\s*=\s*(?:"([^"]*)"|(true|false))'
 )
 
 _TEMPLATE_SEGMENT = "template"
@@ -162,23 +160,6 @@ def detect_format(dst: Path) -> str:
     return _FORMAT_BY_EXT.get(dst.suffix.lower(), "raw")
 
 
-def _parse_kwargs(args_str: str) -> dict[str, str]:
-    """Parse a comma-separated ``k=v`` kwargs blob.
-
-    Accepts ``k="string"`` and ``k=true``/``k=false`` (for project/global
-    flags). Unrecognized tokens are silently ignored rather than raising so
-    a stray comma doesn't turn a render into a hard error.
-    """
-    kwargs: dict[str, str] = {}
-    if not args_str:
-        return kwargs
-    for m in _KWARG_RE.finditer(args_str):
-        k = m.group(1)
-        v = m.group(2) if m.group(2) is not None else m.group(3)
-        kwargs[k] = v
-    return kwargs
-
-
 def render_text(
     text: str,
     lookup: VaultLookup,
@@ -197,7 +178,7 @@ def render_text(
         nonlocal count
         key = match.group(1)
         args_str = match.group(2) or ""
-        kwargs = _parse_kwargs(args_str)
+        kwargs = parse_vault_kwargs(args_str)
 
         env = kwargs.get("env", default_env)
         project_flag = kwargs.get("project")

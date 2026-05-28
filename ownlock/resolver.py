@@ -8,15 +8,38 @@ from typing import Optional
 
 from ownlock.vault import VaultManager, GLOBAL_VAULT_PATH
 
-# Pattern: vault("key"[, env="envname"][, project=true|false|global=true|false])
+# vault() reference: "vault(" + quoted name + optional kwargs blob + ")"
+# Kwargs are parsed by KWARG_RE so they may appear in any order. The outer
+# match is non-greedy on the kwargs blob and rejects nested parentheses.
 _VAULT_RE = re.compile(
-    r'^vault\(\s*"([^"]+)"'  # vault("key-name"
-    r'(?:\s*,\s*env\s*=\s*"([^"]+)")?'  # optional env="prod"
-    r'(?:\s*,\s*(?:project\s*=\s*(true|false)'  # optional project=true/false
-    r'|global\s*=\s*(true|false)))?'  # or global=true/false
-    r'\s*\)$'  # )
+    r'^vault\(\s*"([^"]+)"\s*(?:,\s*([^)]+?))?\s*\)$'
+)
+KWARG_RE = re.compile(
+    r'(\w+)\s*=\s*(?:"([^"]*)"|(true|false))'
 )
 _SECRET_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def parse_vault_kwargs(args_str: Optional[str]) -> dict[str, str]:
+    """Parse a comma-separated ``k=v`` blob from inside a ``vault(...)`` call.
+
+    Accepts ``key="string"`` and ``key=true`` / ``key=false`` (for the
+    ``project`` / ``global`` flags). Order is irrelevant. Unknown tokens are
+    silently ignored so a stray comma doesn't turn a resolve into a hard
+    error; missing required keys still surface as KeyErrors at lookup time.
+
+    Shared by ``ownlock.resolver`` (for ``.env`` ``vault(...)`` calls) and
+    ``ownlock.templates`` (for ``{{vault(...)}}`` calls), so both surfaces
+    accept identical kwarg syntax.
+    """
+    if not args_str:
+        return {}
+    kwargs: dict[str, str] = {}
+    for m in KWARG_RE.finditer(args_str):
+        key = m.group(1)
+        val = m.group(2) if m.group(2) is not None else m.group(3)
+        kwargs[key] = val
+    return kwargs
 
 
 class VaultLookup:
@@ -125,12 +148,18 @@ def resolve_env_file(
             match = _VAULT_RE.match(raw_value)
             if match:
                 vault_key = match.group(1)
-                vault_env = match.group(2) or env
-                project_flag = match.group(3)  # "true"/"false"/None
-                global_flag = match.group(4)  # "true"/"false"/None
+                kwargs = parse_vault_kwargs(match.group(2))
 
-                project_bool: Optional[bool] = (project_flag == "true") if project_flag else None
-                global_bool: Optional[bool] = (global_flag == "true") if global_flag else None
+                vault_env = kwargs.get("env", env)
+                project_flag = kwargs.get("project")
+                global_flag = kwargs.get("global")
+
+                project_bool: Optional[bool] = (
+                    (project_flag == "true") if project_flag else None
+                )
+                global_bool: Optional[bool] = (
+                    (global_flag == "true") if global_flag else None
+                )
 
                 value = lookup.lookup(
                     vault_key,
