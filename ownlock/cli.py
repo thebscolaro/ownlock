@@ -291,6 +291,44 @@ def init(
     console.print(f"[green]Vault created at {_format_vault_path(project_path)}[/green]")
 
 
+def _read_value_from_editor(name: str) -> str:
+    """Open ``$EDITOR`` on a temp file and return its contents.
+
+    The temp file is created with mode 0600 on POSIX and unlinked after read,
+    even if the editor is killed mid-edit.
+    """
+    import shlex
+    import subprocess
+    import tempfile
+
+    editor = os.environ.get("OWNLOCK_EDITOR") or os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        if os.name == "nt":
+            editor = "notepad"
+        else:
+            editor = "vi"
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f"ownlock-{name}-", suffix=".secret")
+    try:
+        os.close(fd)
+        if os.name == "posix":
+            try:
+                os.chmod(tmp_name, 0o600)
+            except OSError:
+                pass
+
+        # shlex.split lets users put flags in $EDITOR (e.g. "code --wait").
+        argv = shlex.split(editor) + [tmp_name]
+        subprocess.run(argv, check=True)  # noqa: S603 (argv list, no shell)
+
+        return Path(tmp_name).read_text(encoding="utf-8")
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+
+
 @app.command("set")
 @_safe_command
 def set_secret(
@@ -298,10 +336,56 @@ def set_secret(
     env: str = typer.Option("default", "--env", "-e", help="Environment (default, production, etc.)."),
     global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    from_file: Optional[Path] = typer.Option(
+        None,
+        "--from-file",
+        help="Read the secret value from this file (preserves newlines, "
+        "useful for PEM keys / JSON service-account files).",
+    ),
+    from_editor: bool = typer.Option(
+        False,
+        "--editor",
+        help="Open $EDITOR (or $VISUAL) to type a multi-line secret. "
+        "Temp file is mode 0600 and is unlinked when the editor closes.",
+    ),
+    strip: bool = typer.Option(
+        True,
+        "--strip/--no-strip",
+        help="With --from-file or --editor: strip a single trailing newline from the value.",
+    ),
 ) -> None:
-    """Store a secret in the vault."""
-    if "=" in key_value:
+    """Store a secret in the vault.
+
+    Three input modes:
+
+    * ``ownlock set NAME=value`` — inline.
+    * ``ownlock set NAME`` — interactive single-line prompt (hidden).
+    * ``ownlock set NAME --from-file path`` — read from disk (multi-line ok).
+    * ``ownlock set NAME --editor`` — open $EDITOR for multi-line input.
+    """
+    if "=" in key_value and not (from_file or from_editor):
         name, _, value = key_value.partition("=")
+    elif from_file is not None or from_editor:
+        # Multi-line modes use the bare key form: `ownlock set NAME --from-file ...`
+        name = key_value
+        if "=" in key_value:
+            console.print(
+                "[red]Use either NAME=VALUE or --from-file/--editor, not both.[/red]"
+            )
+            raise typer.Exit(1)
+        if from_file is not None and from_editor:
+            console.print("[red]--from-file and --editor are mutually exclusive.[/red]")
+            raise typer.Exit(1)
+        if from_file is not None:
+            file_path = _validate_env_file(from_file)
+            if not file_path.exists():
+                console.print(f"[red]File not found: {from_file}[/red]")
+                raise typer.Exit(1)
+            value = file_path.read_text(encoding="utf-8")
+        else:
+            value = _read_value_from_editor(key_value)
+        if strip and value.endswith("\n") and not value.endswith("\n\n"):
+            value = value[:-1]
     else:
         name = key_value
         value = getpass.getpass(f"Enter value for '{name}': ")

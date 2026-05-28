@@ -190,6 +190,63 @@ class TestSetGet:
         assert result.exit_code == 0
         assert "new-value" in result.output
 
+    def test_set_from_file_preserves_multi_line(self, tmp_path, vault_db, seeded_vault):
+        pem = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSk\n"
+            "AgEAAoIBAQDFakeMultiLineKeyContent==\n"
+            "-----END PRIVATE KEY-----\n"
+        )
+        key_file = tmp_path / "key.pem"
+        key_file.write_text(pem)
+
+        result = runner.invoke(app, ["set", "PEM_KEY", "--from-file", str(key_file)])
+        assert result.exit_code == 0
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            stored = vm.get("PEM_KEY")
+        # Default --strip removes the single trailing newline.
+        assert stored == pem.rstrip("\n")
+        assert "-----BEGIN PRIVATE KEY-----" in stored
+        assert "MIIE" in stored
+
+    def test_set_from_file_no_strip(self, tmp_path, vault_db, seeded_vault):
+        f = tmp_path / "v.txt"
+        f.write_text("line1\nline2\n")
+        result = runner.invoke(
+            app, ["set", "MULTI", "--from-file", str(f), "--no-strip"]
+        )
+        assert result.exit_code == 0
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("MULTI") == "line1\nline2\n"
+
+    def test_set_from_file_with_value_form_is_rejected(self, vault_db, seeded_vault, tmp_path):
+        f = tmp_path / "x"
+        f.write_text("y")
+        result = runner.invoke(
+            app, ["set", "K=ignored", "--from-file", str(f)]
+        )
+        assert result.exit_code == 1
+        assert "Use either" in result.output
+
+    def test_set_editor_uses_OWNLOCK_EDITOR(self, vault_db, seeded_vault, tmp_path, monkeypatch):
+        """--editor invokes a fake editor that writes a known multi-line value."""
+        import sys as _sys
+
+        # Build a tiny "editor" that writes a fixed value to its argv[1].
+        helper = tmp_path / "fake_editor.py"
+        helper.write_text(
+            "import sys, pathlib\n"
+            "pathlib.Path(sys.argv[1]).write_text('hello\\nworld\\n')\n"
+        )
+        editor_cmd = f"{_sys.executable} {helper}"
+        monkeypatch.setenv("OWNLOCK_EDITOR", editor_cmd)
+
+        result = runner.invoke(app, ["set", "VIA_EDITOR", "--editor"])
+        assert result.exit_code == 0, result.output
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("VIA_EDITOR") == "hello\nworld"  # trailing newline stripped
+
 
 class TestList:
     def test_list_shows_name(self, seeded_vault):
