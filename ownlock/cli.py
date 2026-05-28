@@ -18,6 +18,7 @@ from rich.table import Table
 # monkeypatch ``ownlock.cli._is_tty`` / ``ownlock.cli._resolve_vault_path`` /
 # ``ownlock.cli._write_env_backup`` keep working without each test learning
 # about the new module layout.
+from ownlock import audit
 from ownlock.backups import (
     LEGACY_BACKUP_SUFFIX as _LEGACY_BACKUP_SUFFIX,
     backup_dir_for as _backup_dir_for,
@@ -389,6 +390,7 @@ def set_secret(
     with VaultManager(vault_path, passphrase) as vm:
         vm.set(name, value, env)
 
+    audit.record("set", vault_path=vault_path, name=name, env=env)
     console.print(f"[green]Secret '{name}' stored (env={env}).[/green]")
 
 
@@ -705,6 +707,15 @@ def rekey(
         )
         raise typer.Exit(1)
 
+    audit.record(
+        "rekey",
+        vault_path=vault_path,
+        extra={
+            "secrets_rekeyed": count,
+            "rotated_passphrase": do_rotate,
+            "target_iterations": target_iters,
+        },
+    )
     console.print(f"[green]Re-encrypted {count} secret(s).[/green]")
 
     # Two-phase keyring update: only after the SQL transaction succeeds.
@@ -740,6 +751,7 @@ def delete(
         removed = vm.delete(name, env)
 
     if removed:
+        audit.record("delete", vault_path=vault_path, name=name, env=env)
         console.print(f"[green]Deleted '{name}' (env={env}).[/green]")
     else:
         console.print(f"[yellow]Secret '{name}' not found (env={env}).[/yellow]")
@@ -1390,6 +1402,15 @@ def share(
         except OSError:
             pass
 
+    audit.record(
+        "share",
+        vault_path=vault_path,
+        extra={
+            "bundle_path": str(output),
+            "secrets_exported": len(decrypted),
+            "names": sorted({s["name"] for s in decrypted}),
+        },
+    )
     console.print(
         f"[green]Wrote {len(decrypted)} secret(s) to {output} "
         "(encrypted, mode 0600 on POSIX).[/green]"
@@ -1499,6 +1520,15 @@ def import_share(
         for entry in secrets:
             vm.set(entry["name"], entry["value"], entry["env"])
 
+    audit.record(
+        "import-share",
+        vault_path=vault_path,
+        extra={
+            "bundle_path": str(bundle_file),
+            "secrets_imported": len(secrets),
+            "names": sorted({s["name"] for s in secrets}),
+        },
+    )
     console.print(
         f"[green]Imported {len(secrets)} secret(s) into "
         f"{_format_vault_path(vault_path)}.[/green]"
@@ -1638,6 +1668,14 @@ def bootstrap(
         for (key, ref_env), value in supplied.items():
             vm.set(key, value, ref_env)
 
+    audit.record(
+        "bootstrap",
+        vault_path=vault_path,
+        extra={
+            "secrets_set": len(supplied),
+            "names": sorted({k for (k, _) in supplied}),
+        },
+    )
     console.print(f"[green]Stored {len(supplied)} secret(s).[/green]")
     skipped = len(missing) - len(supplied)
     if skipped:
