@@ -1214,6 +1214,208 @@ def import_env(
     console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
 
 
+@app.command("share")
+@_safe_command
+def share(
+    secret_names: Optional[list[str]] = typer.Argument(
+        None,
+        help="Secret names to include. Omit to share every secret.",
+    ),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Where to write the encrypted bundle file."
+    ),
+    env: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Restrict the export to one vault environment (default: all).",
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Export secrets into an encrypted bundle for a teammate.
+
+    The bundle is protected by its own passphrase, prompted separately from
+    the vault passphrase. Send the bundle file and tell the recipient the
+    bundle passphrase out of band; they decrypt it locally with
+    ``ownlock import-share``.
+
+    Reads ``OWNLOCK_BUNDLE_PASSPHRASE`` if set (for non-interactive use).
+    """
+    from ownlock.share import export_bundle
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        rows = vm.list_secrets(env)
+        decrypted: list[dict[str, str]] = []
+        for row in rows:
+            if secret_names and row["name"] not in secret_names:
+                continue
+            value = vm.get(row["name"], row["env"])
+            if value is None:
+                continue
+            decrypted.append(
+                {"name": row["name"], "env": row["env"], "value": value}
+            )
+
+    if not decrypted:
+        if secret_names:
+            console.print(
+                f"[yellow]No matching secrets found for: {', '.join(secret_names)}[/yellow]"
+            )
+        else:
+            console.print("[dim]Vault is empty; nothing to share.[/dim]")
+        raise typer.Exit(1)
+
+    bundle_pp = os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE")
+    if bundle_pp is None:
+        if not _is_tty():
+            console.print(
+                "[red]Non-interactive run requires OWNLOCK_BUNDLE_PASSPHRASE.[/red]"
+            )
+            raise typer.Exit(1)
+        bundle_pp = getpass.getpass("Bundle passphrase: ")
+        if not bundle_pp:
+            console.print("[red]Bundle passphrase cannot be empty.[/red]")
+            raise typer.Exit(1)
+        confirm = getpass.getpass("Confirm bundle passphrase: ")
+        if bundle_pp != confirm:
+            console.print("[red]Passphrases do not match.[/red]")
+            raise typer.Exit(1)
+
+    if _is_tty() and not yes and not os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE"):
+        if not typer.confirm(
+            f"Export {len(decrypted)} secret(s) to {output}?", default=True
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    bundle_text = export_bundle(decrypted, bundle_pp)
+    output.write_text(bundle_text, encoding="utf-8")
+    if os.name == "posix":
+        try:
+            os.chmod(output, 0o600)
+        except OSError:
+            pass
+
+    console.print(
+        f"[green]Wrote {len(decrypted)} secret(s) to {output} "
+        "(encrypted, mode 0600 on POSIX).[/green]"
+    )
+
+
+@app.command("import-share")
+@_safe_command
+def import_share(
+    bundle_file: Path = typer.Argument(..., help="Encrypted bundle file to import."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Overwrite existing secrets without prompting.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Overwrite existing secrets that conflict with the bundle.",
+    ),
+) -> None:
+    """Import an encrypted bundle (from ``ownlock share``) into the local vault.
+
+    Reads ``OWNLOCK_BUNDLE_PASSPHRASE`` if set, otherwise prompts. Refuses to
+    overwrite existing secrets unless ``--overwrite`` is passed (or you
+    confirm interactively).
+    """
+    from ownlock.share import import_bundle
+
+    if not bundle_file.exists():
+        console.print(f"[red]Bundle file not found: {bundle_file}[/red]")
+        raise typer.Exit(1)
+
+    bundle_pp = os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE")
+    if bundle_pp is None:
+        if not _is_tty():
+            console.print(
+                "[red]Non-interactive run requires OWNLOCK_BUNDLE_PASSPHRASE.[/red]"
+            )
+            raise typer.Exit(1)
+        bundle_pp = getpass.getpass("Bundle passphrase: ")
+        if not bundle_pp:
+            console.print("[red]Bundle passphrase cannot be empty.[/red]")
+            raise typer.Exit(1)
+
+    try:
+        bundle_text = bundle_file.read_text(encoding="utf-8")
+    except OSError as e:
+        console.print(f"[red]Could not read bundle: {e}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        secrets = import_bundle(bundle_text, bundle_pp)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        from cryptography.exceptions import InvalidTag
+
+        if isinstance(e, InvalidTag):
+            console.print(
+                "[red]Could not decrypt bundle: wrong passphrase or tampered file.[/red]"
+            )
+            raise typer.Exit(1)
+        raise
+
+    if not secrets:
+        console.print("[dim]Bundle is empty; nothing to import.[/dim]")
+        return
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    # Detect conflicts before writing anything.
+    conflicts: list[tuple[str, str]] = []
+    with VaultManager(vault_path, passphrase) as vm:
+        for entry in secrets:
+            if vm.get(entry["name"], entry["env"]) is not None:
+                conflicts.append((entry["name"], entry["env"]))
+
+    if conflicts and not overwrite:
+        console.print(
+            f"[yellow]{len(conflicts)} secret(s) in the bundle already exist in the vault:[/yellow]"
+        )
+        for name, env in conflicts[:10]:
+            suffix = f" (env={env})" if env != "default" else ""
+            console.print(f"  - {name}{suffix}")
+        if len(conflicts) > 10:
+            console.print(f"  ... and {len(conflicts) - 10} more")
+        if _is_tty() and not yes:
+            if not typer.confirm("Overwrite them?", default=False):
+                console.print(
+                    "[dim]Cancelled. Run with --overwrite to overwrite, or "
+                    "delete conflicting keys first.[/dim]"
+                )
+                raise typer.Exit(1)
+        else:
+            console.print(
+                "[red]Refusing to overwrite without --overwrite (or interactive confirm).[/red]"
+            )
+            raise typer.Exit(1)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        for entry in secrets:
+            vm.set(entry["name"], entry["value"], entry["env"])
+
+    console.print(
+        f"[green]Imported {len(secrets)} secret(s) into "
+        f"{_format_vault_path(vault_path)}.[/green]"
+    )
+
+
 @app.command("bootstrap")
 @_safe_command
 def bootstrap(
