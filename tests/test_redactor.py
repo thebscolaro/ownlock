@@ -11,17 +11,23 @@ from ownlock.redactor import SecretRedactor
 
 class TestRedact:
     def test_replaces_known_value(self):
-        r = SecretRedactor({"DB_PASS": "s3cr3t"})
-        assert r.redact("password is s3cr3t ok") == "password is [REDACTED:DB_PASS] ok"
+        r = SecretRedactor({"DB_PASS": "super-secret-value"})
+        assert (
+            r.redact("password is super-secret-value ok")
+            == "password is [REDACTED:DB_PASS] ok"
+        )
 
     def test_multiple_secrets_in_one_line(self):
-        r = SecretRedactor({"A": "aaa", "B": "bbb"})
-        result = r.redact("values: aaa and bbb done")
+        r = SecretRedactor({"A": "aaaaaaaaa", "B": "bbbbbbbbb"})
+        result = r.redact("values: aaaaaaaaa and bbbbbbbbb done")
         assert result == "values: [REDACTED:A] and [REDACTED:B] done"
 
     def test_secret_appearing_multiple_times(self):
-        r = SecretRedactor({"TOKEN": "xyz"})
-        assert r.redact("xyz-xyz-xyz") == "[REDACTED:TOKEN]-[REDACTED:TOKEN]-[REDACTED:TOKEN]"
+        r = SecretRedactor({"TOKEN": "xyz12345abc"})
+        assert (
+            r.redact("xyz12345abc-xyz12345abc-xyz12345abc")
+            == "[REDACTED:TOKEN]-[REDACTED:TOKEN]-[REDACTED:TOKEN]"
+        )
 
     def test_empty_secrets_no_redaction(self):
         r = SecretRedactor({})
@@ -29,26 +35,76 @@ class TestRedact:
         assert r.redact(text) == text
 
     def test_longer_secrets_replaced_first(self):
-        r = SecretRedactor({"SHORT": "abc", "LONG": "abcdef"})
-        result = r.redact("prefix abcdef suffix")
+        r = SecretRedactor({"SHORT": "abcd1234", "LONG": "abcd1234efgh"})
+        result = r.redact("prefix abcd1234efgh suffix")
         assert "[REDACTED:LONG]" in result
         assert "[REDACTED:SHORT]" not in result
+
+    def test_short_values_below_threshold_skipped(self):
+        """Sub-threshold values like 'ok' or 'true' must not be redacted."""
+        r = SecretRedactor({"FOO": "ok"})
+        # Long enough sentence; should pass through unchanged.
+        text = "everything is ok and the build is green"
+        assert r.redact(text) == text
+
+
+class TestVariantEncodings:
+    """Common encodings of secret values are also redacted."""
+
+    def test_base64_form_redacted(self):
+        import base64 as _b64
+
+        secret = "my-secret-token-1234"
+        b64 = _b64.b64encode(secret.encode()).decode()
+        r = SecretRedactor({"TOK": secret})
+        result = r.redact(f"Authorization: Basic {b64}")
+        assert b64 not in result
+        assert "[REDACTED:TOK]" in result
+
+    def test_url_encoded_form_redacted(self):
+        secret = "p@ssword/with+special=chars"
+        import urllib.parse as _u
+
+        encoded = _u.quote(secret, safe="")
+        r = SecretRedactor({"PWD": secret})
+        result = r.redact(f"https://x.example/u?token={encoded}&ok=1")
+        assert encoded not in result
+        assert "[REDACTED:PWD]" in result
+
+    def test_json_escaped_form_redacted(self):
+        secret = 'val"with"quotes\nand\\backslash'
+        encoded = secret.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        r = SecretRedactor({"X": secret})
+        result = r.redact(f'{{"x": "{encoded}"}}')
+        assert "[REDACTED:X]" in result
+        assert encoded not in result
+
+    def test_raw_value_still_redacted_alongside_variants(self):
+        secret = "looooooong-secret-12345"
+        r = SecretRedactor({"S": secret})
+        # Raw form
+        assert r.redact(f"value={secret}") == "value=[REDACTED:S]"
+
+    def test_short_secrets_have_no_variants(self):
+        """Skipping short secrets also skips their variants."""
+        r = SecretRedactor({"S": "abc"})
+        assert r._replacements == []
 
 
 class TestRunProcess:
     def test_echo_command_redacted(self):
-        r = SecretRedactor({"SECRET": "hunter2"})
+        r = SecretRedactor({"SECRET": "hunter2-very-long-password"})
         out = io.StringIO()
         err = io.StringIO()
         exit_code = r.run_process(
-            ["echo", "my password is hunter2"],
+            ["echo", "my password is hunter2-very-long-password"],
             env={},
             stdout=out,
             stderr=err,
         )
         assert exit_code == 0
         assert "[REDACTED:SECRET]" in out.getvalue()
-        assert "hunter2" not in out.getvalue()
+        assert "hunter2-very-long-password" not in out.getvalue()
 
     def test_exit_code_forwarded(self):
         r = SecretRedactor({})
