@@ -68,3 +68,52 @@ def test_ownlock_list_secret_names_passes_flags(mock_run: MagicMock) -> None:
 def test_ownlock_version() -> None:
     v = mcp_server.ownlock_version()
     assert v and len(v) >= 3
+
+
+def test_ownlock_doctor_returns_parsed_json(mock_run: MagicMock) -> None:
+    mock_run.return_value = MagicMock(
+        returncode=0,
+        stdout='{"ownlock_version": "0.2.0", "global_vault": {"exists": true}}',
+        stderr="",
+    )
+    out = mcp_server.ownlock_doctor()
+    assert out["ownlock_version"] == "0.2.0"
+    assert out["global_vault"]["exists"] is True
+    assert mock_run.call_args[0][0] == ["doctor", "--json"]
+
+
+def test_ownlock_doctor_handles_failure(mock_run: MagicMock) -> None:
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="oh no")
+    out = mcp_server.ownlock_doctor()
+    assert "error" in out
+    assert "oh no" in out["stderr"]
+
+
+def test_ownlock_status_combines_doctor_and_list(mock_run: MagicMock) -> None:
+    list_json = '[{"name": "A", "env": "default"}, {"name": "B", "env": "prod"}]'
+    doctor_json = (
+        '{"global_vault": {"path": "/g/v.db", "exists": true, '
+        '"schema_version": 2, "kdf_iterations": 600000, "kdf_stale": false}, '
+        '"project_vault": {"path": null, "exists": false}, '
+        '"passphrase_source": "env var"}'
+    )
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=list_json, stderr=""),
+        MagicMock(returncode=0, stdout=doctor_json, stderr=""),
+    ]
+    out = mcp_server.ownlock_status()
+    assert out["secret_count"] == 2
+    assert out["environments"] == ["default", "prod"]
+    assert out["passphrase_source"] == "env var"
+    assert out["kdf_stale"] is False
+    assert out["selected_vault"] == "global"
+
+
+def test_ownlock_doctor_does_not_decrypt() -> None:
+    """Sanity check: ``ownlock_doctor`` only ever invokes the CLI subprocess."""
+    with patch.object(mcp_server, "_run_ownlock") as mock:
+        mock.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        mcp_server.ownlock_doctor()
+        # Must call subprocess, never crypto/vault directly.
+        assert mock.called
+        assert mock.call_args[0][0][0] == "doctor"
