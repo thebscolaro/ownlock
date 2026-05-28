@@ -421,6 +421,204 @@ def doctor() -> None:
     console.print(f"MCP package importable: {'yes' if mcp_ok else 'no'} (pip install 'ownlock[mcp]')")
 
 
+def _backup_vault_file(vault_path: Path) -> Path:
+    """Copy *vault_path* to ``.ownlock/backups/vault.db.backup-<UTC>`` (mode 0600).
+
+    Used by ``rekey`` so a partial / failed rekey can never corrupt the live
+    vault: the live file is untouched until the SQL transaction commits, and
+    the backup copy is left in place after success for the user to delete
+    once they're confident.
+    """
+    backup_dir = vault_path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = backup_dir / f"{vault_path.name}.backup-{timestamp}"
+    backup_path.write_bytes(vault_path.read_bytes())
+    if os.name == "posix":
+        try:
+            os.chmod(backup_path, 0o600)
+        except OSError:
+            pass
+    return backup_path
+
+
+@app.command("rekey")
+@_safe_command
+def rekey(
+    upgrade_kdf: bool = typer.Option(
+        False,
+        "--upgrade-kdf",
+        help="Re-encrypt all secrets at the current default KDF iterations. Keeps the same passphrase.",
+    ),
+    rotate_passphrase: bool = typer.Option(
+        False,
+        "--rotate-passphrase",
+        help="Rotate the vault passphrase. Reads OWNLOCK_NEW_PASSPHRASE if set, otherwise prompts.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts."),
+    no_keyring: bool = typer.Option(
+        False,
+        "--no-keyring",
+        help="With --rotate-passphrase: do not update the system keyring with the new passphrase.",
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+) -> None:
+    """Re-encrypt vault secrets, optionally with new passphrase or new KDF parameters.
+
+    With no flags in a TTY: interactive flow that asks whether to upgrade KDF
+    and/or rotate the passphrase. The vault file is copied to
+    ``.ownlock/backups/`` before any change so a failed rekey can never
+    corrupt the live vault.
+    """
+    from ownlock.crypto import KDF_ITERATIONS_CURRENT
+
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    if not vault_path.exists():
+        console.print(f"[red]Vault not found at {_format_vault_path(vault_path)}.[/red]")
+        raise typer.Exit(1)
+
+    passphrase = resolve_passphrase()
+
+    with VaultManager(vault_path, passphrase) as vm:
+        meta = vm.get_meta()
+        schema = vm.schema_version()
+        current_iters = vm.kdf_iterations()
+        iter_summary = vm.secret_iterations_summary()
+        secret_count = sum(iter_summary.values())
+        envs = sorted({s["env"] for s in vm.list_secrets()})
+
+    is_kdf_stale = current_iters < KDF_ITERATIONS_CURRENT or any(
+        i < KDF_ITERATIONS_CURRENT for i in iter_summary
+    )
+
+    # Decide actions: explicit flags win; otherwise interactive prompts.
+    do_upgrade_kdf = upgrade_kdf
+    do_rotate = rotate_passphrase
+
+    if not (upgrade_kdf or rotate_passphrase):
+        if _is_tty() and not yes:
+            console.print(f"[bold]Vault[/bold]: {_format_vault_path(vault_path)}")
+            console.print(
+                f"  schema:        v{schema}"
+                + ("" if schema == 2 else "  [yellow](current: v2)[/yellow]")
+            )
+            console.print(
+                f"  kdf:           {meta.get('kdf_algo', 'PBKDF2-HMAC-SHA256')}, "
+                f"{current_iters:,} iterations"
+                + ("" if not is_kdf_stale else f"  [yellow](current: {KDF_ITERATIONS_CURRENT:,})[/yellow]")
+            )
+            if iter_summary:
+                breakdown = ", ".join(
+                    f"{count} at {iters:,}" for iters, count in sorted(iter_summary.items())
+                )
+                console.print(f"  secrets:       {secret_count} ({breakdown})")
+            else:
+                console.print("  secrets:       0")
+            if envs:
+                console.print(f"  environments:  {', '.join(envs)}")
+
+            do_upgrade_kdf = typer.confirm(
+                "Upgrade KDF to current parameters?",
+                default=is_kdf_stale,
+            )
+            do_rotate = typer.confirm(
+                "Rotate passphrase to a new one?",
+                default=False,
+            )
+        else:
+            console.print(
+                "[red]Pass --upgrade-kdf and/or --rotate-passphrase, or run interactively.[/red]"
+            )
+            raise typer.Exit(1)
+
+    if not (do_upgrade_kdf or do_rotate):
+        console.print("[dim]Nothing to do.[/dim]")
+        return
+
+    new_passphrase = passphrase
+    if do_rotate:
+        env_pp = os.environ.get("OWNLOCK_NEW_PASSPHRASE")
+        if env_pp:
+            new_passphrase = env_pp
+        else:
+            if not _is_tty() and not yes:
+                console.print(
+                    "[red]Cannot rotate passphrase non-interactively without "
+                    "OWNLOCK_NEW_PASSPHRASE.[/red]"
+                )
+                raise typer.Exit(1)
+            new_passphrase = getpass.getpass("New vault passphrase: ")
+            if not new_passphrase:
+                console.print("[red]Passphrase cannot be empty.[/red]")
+                raise typer.Exit(1)
+            confirm = getpass.getpass("Confirm new passphrase: ")
+            if new_passphrase != confirm:
+                console.print("[red]Passphrases do not match.[/red]")
+                raise typer.Exit(1)
+
+    target_iters = KDF_ITERATIONS_CURRENT  # always re-encrypt at current default
+
+    # Idempotent fast-path: nothing to do if already at current params and not rotating.
+    if (
+        not do_rotate
+        and current_iters == KDF_ITERATIONS_CURRENT
+        and iter_summary == {KDF_ITERATIONS_CURRENT: secret_count}
+        and schema == 2
+    ):
+        console.print(
+            f"[dim]Vault is already at schema v2, KDF {KDF_ITERATIONS_CURRENT:,}. "
+            "Nothing to upgrade.[/dim]"
+        )
+        return
+
+    if _is_tty() and not yes:
+        action_parts: list[str] = []
+        if do_upgrade_kdf and current_iters != KDF_ITERATIONS_CURRENT:
+            action_parts.append(
+                f"raise KDF iterations to {KDF_ITERATIONS_CURRENT:,}"
+            )
+        if do_rotate:
+            action_parts.append("rotate the passphrase")
+        action_str = " and ".join(action_parts) if action_parts else "re-encrypt secrets"
+        if not typer.confirm(
+            f"Re-encrypt {secret_count} secret(s) to {action_str}?", default=True
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    backup_path = _backup_vault_file(vault_path)
+    console.print(f"[dim]Backed up vault to {backup_path}.[/dim]")
+
+    try:
+        with VaultManager(vault_path, passphrase) as vm:
+            count = vm.rekey(new_passphrase, target_iterations=target_iters)
+    except Exception as e:
+        console.print(
+            f"[red]Rekey failed: {e}. Live vault is unchanged. "
+            f"Backup at {backup_path}.[/red]"
+        )
+        raise typer.Exit(1)
+
+    console.print(f"[green]Re-encrypted {count} secret(s).[/green]")
+
+    # Two-phase keyring update: only after the SQL transaction succeeds.
+    if do_rotate and not no_keyring:
+        ok, err = store_passphrase(new_passphrase)
+        if ok:
+            console.print("[dim]Updated keyring with new passphrase.[/dim]")
+        else:
+            detail = f" ({err})" if err else ""
+            console.print(
+                f"[yellow]Could not update keyring{detail}. "
+                "Set OWNLOCK_PASSPHRASE to the new passphrase or update the keyring manually.[/yellow]"
+            )
+
+    console.print(
+        f"[dim]Backup left at {backup_path}; remove once you've verified the new vault works.[/dim]"
+    )
+
+
 @app.command()
 @_safe_command
 def delete(

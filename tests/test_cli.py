@@ -513,6 +513,96 @@ class TestRun:
         assert "[REDACTED:" in result.output or result.exit_code == 0
 
 
+class TestRekey:
+    """ownlock rekey: passphrase rotation and KDF upgrade."""
+
+    def test_rekey_upgrade_kdf_idempotent_at_current(self, vault_db, seeded_vault):
+        """Vault at current schema/KDF is a no-op."""
+        result = runner.invoke(app, ["rekey", "--upgrade-kdf", "--yes"])
+        assert result.exit_code == 0
+        assert "Nothing to upgrade" in result.output or "already" in result.output
+
+    def test_rekey_rotate_passphrase_with_env(self, vault_db, seeded_vault, monkeypatch):
+        """Non-interactive rotation reads new passphrase from OWNLOCK_NEW_PASSPHRASE."""
+        from ownlock.vault import VaultManager as _VM
+
+        monkeypatch.setenv("OWNLOCK_NEW_PASSPHRASE", "rotated-pp-x")
+        # Avoid touching the real keyring during test.
+        monkeypatch.setattr("ownlock.cli.store_passphrase", lambda p: (True, None))
+
+        result = runner.invoke(app, ["rekey", "--rotate-passphrase", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Re-encrypted" in result.output
+
+        # Old passphrase is broken; new one works.
+        from cryptography.exceptions import InvalidTag
+
+        with _VM(vault_db, PASSPHRASE) as vm:
+            with pytest.raises(InvalidTag):
+                vm.get("MY_KEY")
+        with _VM(vault_db, "rotated-pp-x") as vm:
+            assert vm.get("MY_KEY") == "my-value"
+
+    def test_rekey_creates_backup_file(self, vault_db, seeded_vault, monkeypatch):
+        """Backup is written under .ownlock/backups/ with timestamp."""
+        monkeypatch.setattr("ownlock.cli.store_passphrase", lambda p: (True, None))
+        monkeypatch.setenv("OWNLOCK_NEW_PASSPHRASE", "new-pp")
+
+        result = runner.invoke(app, ["rekey", "--rotate-passphrase", "--yes"])
+        assert result.exit_code == 0
+        backup_dir = vault_db.parent / "backups"
+        backups = list(backup_dir.glob("vault.db.backup-*"))
+        assert len(backups) == 1, backups
+        if os.name == "posix":
+            mode = backups[0].stat().st_mode & 0o777
+            assert mode == 0o600
+
+    def test_rekey_missing_vault_clean_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: tmp_path / "nope" / "vault.db",
+        )
+        result = runner.invoke(app, ["rekey", "--upgrade-kdf", "--yes"])
+        assert result.exit_code == 1
+        assert "Vault not found" in result.output
+
+    def test_rekey_no_args_in_non_tty_requires_flags(self, vault_db, seeded_vault, monkeypatch):
+        """In a non-interactive run with no flags, ownlock refuses to guess."""
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: False)
+        result = runner.invoke(app, ["rekey"])
+        assert result.exit_code == 1
+        assert "--upgrade-kdf" in result.output
+
+    def test_rekey_with_legacy_v1_secret_upgrades_to_v2(self, vault_db, monkeypatch):
+        """A vault containing a v1 token gets upgraded to v2/current iterations."""
+        from ownlock.crypto import (
+            KDF_ITERATIONS_CURRENT,
+            KDF_ITERATIONS_LEGACY,
+            encrypt as _encrypt,
+            token_iterations as _ti,
+        )
+        from ownlock.vault import VaultManager as _VM
+
+        # Seed a vault and inject a legacy-iteration token.
+        with _VM(vault_db, PASSPHRASE) as vm:
+            legacy = _encrypt("classic", PASSPHRASE, iterations=KDF_ITERATIONS_LEGACY)
+            vm._require_conn().execute(
+                "INSERT INTO secrets (name, env, value_enc, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("CLASSIC", "default", legacy, "2025-01-01", "2025-01-01"),
+            )
+            vm._require_conn().commit()
+
+        result = runner.invoke(app, ["rekey", "--upgrade-kdf", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        with _VM(vault_db, PASSPHRASE) as vm:
+            row = vm._require_conn().execute(
+                "SELECT value_enc FROM secrets WHERE name = 'CLASSIC'"
+            ).fetchone()
+            assert _ti(row["value_enc"]) == KDF_ITERATIONS_CURRENT
+
+
 class TestErrorHandling:
     def test_passphrase_not_found_shows_clean_message(self, tmp_path, monkeypatch):
         """ValueError from resolve_passphrase shows clean message, no traceback."""
