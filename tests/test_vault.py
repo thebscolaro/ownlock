@@ -327,3 +327,13 @@ class TestConcurrencyPragmas:
             a.set("THIRD", "3")
             assert a.get("SECOND") == "2"
             assert a.get("THIRD") == "3"
+
+    def test_vault_db_created_with_mode_0600_on_posix(self, tmp_path):
+        import os
+
+        if os.name != "posix":
+            pytest.skip("POSIX file modes only")
+        db = tmp_path / "perms.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("K", "v")
+        assert db.stat().st_mode & 0o777 == 0o600

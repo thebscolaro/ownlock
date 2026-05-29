@@ -135,6 +135,25 @@ def resolve_vault_path(global_vault: bool = False, project: bool = False) -> Pat
     return _vault_module.GLOBAL_VAULT_PATH
 
 
+def vault_path_for_ref(
+    project_flag: Optional[str],
+    global_flag: Optional[str],
+) -> Path:
+    """Pick the vault file for a single ``vault(...)`` reference.
+
+    Mirrors :class:`ownlock.resolver.VaultLookup` selection rules so
+    ``import`` bootstrap writes land in the same vault ``run`` reads from.
+    """
+    use_global = (global_flag == "true") if global_flag else None
+    project = (project_flag == "true") if project_flag else None
+    if use_global is True:
+        return _vault_module.GLOBAL_VAULT_PATH
+    proj = VaultManager.find_project_vault()
+    if proj and (project is True or (project is None and use_global is None)):
+        return proj
+    return _vault_module.GLOBAL_VAULT_PATH
+
+
 def ensure_gitignore() -> None:
     """Add ``.ownlock/`` to ``.gitignore`` if not already present.
 

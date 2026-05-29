@@ -45,6 +45,7 @@ from ownlock.paths import (
     validate_env_file as _validate_env_file,
     validate_scan_dir as _validate_scan_dir,
     validate_secret_name as _validate_secret_name,
+    vault_path_for_ref as _vault_path_for_ref,
 )
 from ownlock.scanner import (
     DEFAULT_MAX_DEPTH as MAX_SCAN_DEPTH,
@@ -767,7 +768,9 @@ def run(
     if no_redact:
         secrets_for_redaction: dict[str, str] = {}
     else:
-        secrets_for_redaction = {k: resolved[k] for k in secret_names if k in resolved}
+        # Redact every value ownlock injects — vault-resolved secrets *and*
+        # inline .env literals (common during migration before rewrite-env).
+        secrets_for_redaction = dict(resolved)
 
     redactor = SecretRedactor(secrets_for_redaction)
     try:
@@ -1196,28 +1199,42 @@ def _import_bootstrap_flow(
     (the teammate-clone workflow). Idempotent: if every reference resolves,
     the function reports that and exits clean.
     """
-    from ownlock.resolver import collect_vault_refs
+    from ownlock.resolver import VaultLookup, collect_vault_refs
 
-    seen: set[tuple[str, str]] = set()
-    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str, Optional[str], Optional[str]]] = set()
+    refs: list[dict[str, Optional[str]]] = []
     for path in files:
         for ref in collect_vault_refs(path):
             key = ref["key"]
             ref_env = ref["env_arg"] or default_env
-            if (key, ref_env) in seen:
+            dedupe_key = (key, ref_env, ref.get("project"), ref.get("use_global"))
+            if dedupe_key in seen:
                 continue
-            seen.add((key, ref_env))
-            refs.append((key, ref_env))
+            seen.add(dedupe_key)
+            refs.append(ref)
 
     if not refs:
         console.print("[dim]No vault() references found.[/dim]")
         return
 
-    missing: list[tuple[str, str]] = []
-    with VaultManager(vault_path, passphrase) as vm:
-        for key, ref_env in refs:
-            if vm.get(key, ref_env) is None:
-                missing.append((key, ref_env))
+    missing: list[dict[str, Optional[str]]] = []
+    with VaultLookup(passphrase) as lookup:
+        for ref in refs:
+            key = ref["key"]
+            ref_env = ref["env_arg"] or default_env
+            project_flag = ref.get("project")
+            global_flag = ref.get("use_global")
+            project_bool = (project_flag == "true") if project_flag else None
+            global_bool = (global_flag == "true") if global_flag else None
+            try:
+                lookup.lookup(
+                    key,
+                    ref_env,
+                    project=project_bool,
+                    use_global=global_bool,
+                )
+            except KeyError:
+                missing.append(ref)
 
     if not missing:
         console.print(
@@ -1230,11 +1247,18 @@ def _import_bootstrap_flow(
         f"[bold]Missing {len(missing)} secret(s)[/bold] "
         f"(of {len(refs)} reference(s) found):"
     )
-    for key, ref_env in missing:
+    for ref in missing:
+        key = ref["key"]
+        ref_env = ref["env_arg"] or default_env
         suffix = f" (env={ref_env})" if ref_env != "default" else ""
-        console.print(f"  - {key}{suffix}")
+        vault_hint = ""
+        if ref.get("use_global") == "true":
+            vault_hint = " [dim](global vault)[/dim]"
+        elif ref.get("project") == "true":
+            vault_hint = " [dim](project vault)[/dim]"
+        console.print(f"  - {key}{suffix}{vault_hint}")
 
-    supplied: dict[tuple[str, str], str] = {}
+    supplied: dict[tuple[str, str, Optional[str], Optional[str]], str] = {}
     if values_from is not None:
         try:
             payload = json.loads(values_from.read_text(encoding="utf-8"))
@@ -1244,9 +1268,13 @@ def _import_bootstrap_flow(
         if not isinstance(payload, dict):
             console.print("[red]--values-from must contain a JSON object.[/red]")
             raise typer.Exit(1)
-        for key, ref_env in missing:
+        for ref in missing:
+            key = ref["key"]
+            ref_env = ref["env_arg"] or default_env
             if key in payload:
-                supplied[(key, ref_env)] = str(payload[key])
+                supplied[(key, ref_env, ref.get("project"), ref.get("use_global"))] = str(
+                    payload[key]
+                )
 
     if not supplied:
         if not is_tty:
@@ -1255,10 +1283,12 @@ def _import_bootstrap_flow(
                 "Pass values via --values-from or run interactively.[/red]"
             )
             raise typer.Exit(1)
-        for key, ref_env in missing:
+        for ref in missing:
+            key = ref["key"]
+            ref_env = ref["env_arg"] or default_env
             value = getpass.getpass(f"Enter value for {key} (env={ref_env}): ")
             if value:
-                supplied[(key, ref_env)] = value
+                supplied[(key, ref_env, ref.get("project"), ref.get("use_global"))] = value
 
     if not supplied:
         console.print("[dim]No values provided. Nothing to write.[/dim]")
@@ -1266,15 +1296,22 @@ def _import_bootstrap_flow(
 
     if is_tty and not yes and not values_from:
         if not typer.confirm(
-            f"Save {len(supplied)} new secret(s) to {_format_vault_path(vault_path)}?",
+            f"Save {len(supplied)} new secret(s) to the vault?",
             default=True,
         ):
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(1)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        for (key, ref_env), value in supplied.items():
-            vm.set(key, value, ref_env)
+    # Group writes by target vault so each file is opened once.
+    by_vault: dict[Path, list[tuple[str, str, str]]] = {}
+    for (key, ref_env, proj, glob), value in supplied.items():
+        target = _vault_path_for_ref(proj, glob)
+        by_vault.setdefault(target, []).append((key, ref_env, value))
+
+    for target_path, items in by_vault.items():
+        with VaultManager(target_path, passphrase) as vm:
+            for key, ref_env, value in items:
+                vm.set(key, value, ref_env)
 
     audit.record(
         "import",
@@ -1282,7 +1319,7 @@ def _import_bootstrap_flow(
         extra={
             "sources": [str(f) for f in files],
             "secrets_set": len(supplied),
-            "names": sorted({k for (k, _) in supplied}),
+            "names": sorted({k for (k, _, _, _) in supplied}),
             "mode": "bootstrap",
         },
     )

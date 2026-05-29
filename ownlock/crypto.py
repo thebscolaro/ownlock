@@ -34,6 +34,9 @@ KEY_LEN = 32
 #     for PBKDF2-SHA256.
 KDF_ITERATIONS_LEGACY = 200_000
 KDF_ITERATIONS_CURRENT = 600_000
+# Sanity cap for v2 tokens — rejects corrupt/malicious DB rows that would
+# trigger unbounded PBKDF2 work on every get/decrypt.
+_MAX_KDF_ITERATIONS = 2_000_000
 
 # Public alias kept for back-compat with anything that imported this constant
 # from older versions; the real default is KDF_ITERATIONS_CURRENT.
@@ -79,6 +82,8 @@ def decrypt(token: str, passphrase: str) -> str:
     raw = base64.b64decode(token)
     if raw[:2] == _V2_PREFIX:
         iterations = int.from_bytes(raw[2:6], "big")
+        if iterations <= 0 or iterations > _MAX_KDF_ITERATIONS:
+            raise ValueError("Invalid KDF iteration count in token")
         body = raw[6:]
     else:
         iterations = KDF_ITERATIONS_LEGACY
@@ -100,5 +105,8 @@ def token_iterations(token: str) -> int:
     """
     raw = base64.b64decode(token)
     if raw[:2] == _V2_PREFIX:
-        return int.from_bytes(raw[2:6], "big")
+        iters = int.from_bytes(raw[2:6], "big")
+        if iters <= 0 or iters > _MAX_KDF_ITERATIONS:
+            raise ValueError("Invalid KDF iteration count in token")
+        return iters
     return KDF_ITERATIONS_LEGACY

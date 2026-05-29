@@ -83,3 +83,12 @@ class TestTokenFormat:
         token = encrypt("x", PASSPHRASE, iterations=210_000)
         assert token_iterations(token) == 210_000
         assert decrypt(token, PASSPHRASE) == "x"
+
+    def test_rejects_absurd_iteration_count_in_v2_token(self):
+        """Corrupt tokens must not trigger unbounded PBKDF2 work."""
+        raw = b"v2" + (99_999_999).to_bytes(4, "big") + os.urandom(SALT_LEN + NONCE_LEN + 32)
+        token = base64.b64encode(raw).decode("ascii")
+        with pytest.raises(ValueError, match="Invalid KDF iteration"):
+            decrypt(token, PASSPHRASE)
+        with pytest.raises(ValueError, match="Invalid KDF iteration"):
+            token_iterations(token)

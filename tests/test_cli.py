@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -237,6 +238,43 @@ class TestInit:
         assert "Skipping import" in result.output
         # File untouched.
         assert (tmp_path / ".env").read_text() == "FOO=bar-value\n"
+
+    def test_init_bootstrap_onboarding_for_vault_refs(
+        self, tmp_path, monkeypatch
+    ):
+        """Init with an existing vault()-style .env runs bootstrap, not seed import."""
+        monkeypatch.chdir(tmp_path)
+        env_file = tmp_path / ".env"
+        env_file.write_text('NEEDED=vault("NEEDED")\n')
+        values_file = tmp_path / "values.json"
+        values_file.write_text(json.dumps({"NEEDED": "from-teammate"}))
+
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(global_path, PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: True)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: tmp_path / ".ownlock" / "vault.db",
+        )
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: None),
+        )
+
+        # y = import now; bootstrap path uses --values-from in real life but
+        # init calls _import_bootstrap_flow interactively — mock getpass.
+        monkeypatch.setattr(
+            "ownlock.cli.getpass.getpass",
+            lambda prompt="": "from-teammate",
+        )
+
+        result = runner.invoke(app, ["init"], input="y\ny\n")
+        assert result.exit_code == 0, result.output
+        assert "Stored 1 secret" in result.output
+        with VaultManager(tmp_path / ".ownlock" / "vault.db", PASSPHRASE) as vm:
+            assert vm.get("NEEDED") == "from-teammate"
 
 
 class TestSetGet:
@@ -552,6 +590,41 @@ class TestImport:
             assert vm.get("KA") == "va"
             assert vm.get("KB") == "vb"
 
+    def test_import_bootstrap_writes_global_ref_to_global_vault(
+        self, tmp_path, monkeypatch
+    ):
+        """vault('KEY', global=true) is stored in the global vault, not project."""
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True)
+        VaultManager.init_vault(global_path, PASSPHRASE).close()
+
+        project_path = tmp_path / ".ownlock" / "vault.db"
+        project_path.parent.mkdir(parents=True)
+        VaultManager.init_vault(project_path, PASSPHRASE).close()
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr("ownlock.vault.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: project_path),
+        )
+
+        env_file = tmp_path / ".env"
+        env_file.write_text('GTOKEN=vault("GTOKEN", global=true)\n')
+        values_file = tmp_path / "v.json"
+        values_file.write_text(json.dumps({"GTOKEN": "global-secret-value"}))
+
+        result = runner.invoke(
+            app, ["import", str(env_file), "--values-from", str(values_file)]
+        )
+        assert result.exit_code == 0, result.output
+
+        with VaultManager(global_path, PASSPHRASE) as vm:
+            assert vm.get("GTOKEN") == "global-secret-value"
+        with VaultManager(project_path, PASSPHRASE) as vm:
+            assert vm.get("GTOKEN") is None
+
 
 class TestDeprecatedAliases:
     """`auto` and `bootstrap` are kept as hidden aliases; they should still work."""
@@ -766,7 +839,7 @@ class TestExport:
         env_file = tmp_path / ".env"
         env_file.write_text('MY_KEY=vault("MY_KEY")\nPLAIN=hello\n')
 
-        with patch("ownlock.resolver.GLOBAL_VAULT_PATH", vault_db):
+        with patch("ownlock.vault.GLOBAL_VAULT_PATH", vault_db):
             result = runner.invoke(app, ["export", "-f", str(env_file)])
 
         assert result.exit_code == 0
@@ -787,17 +860,34 @@ class TestExport:
 
 
 class TestRun:
-    def test_run_injects_env_and_redacts(self, tmp_path, vault_db, seeded_vault):
+    def test_run_injects_vault_secret_into_child(self, tmp_path, vault_db, seeded_vault):
         env_file = tmp_path / ".env"
         env_file.write_text('SECRET=vault("MY_KEY")\n')
+        code = (
+            "import os, sys\n"
+            "sys.exit(0 if os.environ.get('SECRET') == 'my-value' else 1)\n"
+        )
+        result = runner.invoke(
+            app,
+            ["run", "-f", str(env_file), "--", sys.executable, "-c", code],
+        )
+        assert result.exit_code == 0
 
-        with patch("ownlock.resolver.GLOBAL_VAULT_PATH", vault_db):
-            result = runner.invoke(
-                app,
-                ["run", "-f", str(env_file), "--", "echo", "my-value"],
-            )
-
-        assert "[REDACTED:" in result.output or result.exit_code == 0
+    def test_run_injects_inline_env_literal_into_child(self, tmp_path, vault_db):
+        """Migration .env files may still have plaintext values; run injects them."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text("LEGACY_API_KEY=sk-live-migration-secret\n")
+        code = (
+            "import os, sys\n"
+            "sys.exit(0 if os.environ.get('LEGACY_API_KEY') == "
+            "'sk-live-migration-secret' else 1)\n"
+        )
+        result = runner.invoke(
+            app,
+            ["run", "-f", str(env_file), "--", sys.executable, "-c", code],
+        )
+        assert result.exit_code == 0
 
 
 class TestInstallHook:

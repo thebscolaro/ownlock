@@ -23,7 +23,8 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **No network**: ownlock never makes network requests. All data stays local.
 - **Path safety**: Relative paths for `.env` files and scan directories are validated to stay within the current directory.
 - **Subprocess**: `ownlock run` passes the command as a list to the OS exec APIs. No shell interpretation. Secrets are injected as environment variables.
-- **Redaction**: Known secret values are replaced with `[REDACTED:NAME]` in subprocess stdout/stderr.
+- **Redaction**: Values injected into the child process by `ownlock run` are replaced with `[REDACTED:NAME]` in subprocess stdout/stderr — both vault-resolved secrets and inline `.env` literals (common during migration). Use `--no-redact-stdout` only when you explicitly need raw output.
+- **Vault metadata leakage**: Secret **names** (not values) are stored in cleartext in `vault.db` (`name`, `env`, timestamps). Anyone with a copy of the file learns which keys exist without the passphrase. Treat `vault.db` like a sensitive file (0600 permissions, never commit).
 - **MCP** (optional, `ownlock[mcp]`): The stdio MCP server does not load the vault or decrypt in-process. It delegates to the `ownlock` CLI via subprocess; `get` / `export` are not exposed as MCP tools.
 
 ## Security testing

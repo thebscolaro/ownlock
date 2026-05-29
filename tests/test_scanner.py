@@ -51,6 +51,26 @@ def test_skips_dirs(tmp_path: Path) -> None:
     assert result.findings == []
 
 
+def test_scans_ownlock_backups_directory(tmp_path: Path) -> None:
+    """Plaintext env backups under .ownlock/backups/ must not be skipped."""
+    backup_dir = tmp_path / ".ownlock" / "backups"
+    backup_dir.mkdir(parents=True)
+    backup = backup_dir / ".env.20260101T000000Z.bak"
+    backup.write_text("LEAKED=longsecretvalueA\n")
+    result = scan_directory(tmp_path, {"API": "longsecretvalueA"})
+    assert result.has_leak
+    assert any(f.path == backup for f in result.findings)
+
+
+def test_skips_ownlock_vault_db_but_not_backups(tmp_path: Path) -> None:
+    ownlock_dir = tmp_path / ".ownlock"
+    ownlock_dir.mkdir()
+    vault_db = ownlock_dir / "vault.db"
+    vault_db.write_text("longsecretvalueA inside sqlite\n")
+    result = scan_directory(tmp_path, {"K": "longsecretvalueA"})
+    assert not any(f.path == vault_db for f in result.findings)
+
+
 def test_max_file_bytes_skips_oversized(tmp_path: Path) -> None:
     big = tmp_path / "big.txt"
     big.write_text("x" * 200 + "longsecretvalueA")

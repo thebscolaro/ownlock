@@ -395,11 +395,74 @@ The shared boundary is **the env vars your application reads** (`DATABASE_URL`, 
 
 `.ownlock/` is gitignored by default, so the local vault never reaches CI on its own — you opt in if you want it. A typical team setup:
 
-- Each developer has a per-project vault populated via `ownlock bootstrap` after cloning (or `ownlock import-share` for a one-shot handoff).
+- Each developer runs `ownlock init` after cloning (or `ownlock import` to fill in `vault(...)` placeholders).
 - CI sets the same env var names directly from the platform's secrets store. ownlock isn't installed on the runner.
 - `ownlock scan` runs in pre-commit (`ownlock install-hook`) and in CI to refuse commits containing leaked vault values.
 
 You can use ownlock in CI too — set `OWNLOCK_PASSPHRASE` from a runner secret and import a vault you manage outside git — but most teams find the dual-store model cleaner.
+
+### CI integration examples
+
+The pattern is always the same: **inject env vars the way your platform expects**, using the same names your app reads locally via `ownlock run`. ownlock does not need to be on the runner unless you deliberately store a vault there.
+
+**GitHub Actions** — secrets become env vars; no ownlock install required:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      STRIPE_KEY: ${{ secrets.STRIPE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: pytest
+
+  # Optional: block commits that leak vault values into the repo
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ownlock
+      - run: ownlock scan . --yes
+        env:
+          OWNLOCK_PASSPHRASE: ${{ secrets.OWNLOCK_PASSPHRASE }}
+```
+
+The scan job needs `OWNLOCK_PASSPHRASE` only if you want ownlock to decrypt the vault and compare file contents against live secret values. For many teams, a lighter check (grep for `sk_live_`, AWS key patterns, etc.) plus `ownlock install-hook` locally is enough.
+
+**Harness / other CD platforms** — same idea: map platform secrets to env vars in the pipeline stage. Harness doesn't expose secrets for arbitrary local dev pull (by design); that's why ownlock exists on the laptop. In CI, reference `${{ secrets.YOUR_SECRET }}` or the Harness equivalent — the app never knows the difference.
+
+**Running tests with ownlock on the runner** (when you want one vault file managed outside git):
+
+```yaml
+- run: |
+    echo "${{ secrets.OWNLOCK_VAULT_B64 }}" | base64 -d > .ownlock/vault.db
+    chmod 600 .ownlock/vault.db
+- run: ownlock run -- pytest
+  env:
+    OWNLOCK_PASSPHRASE: ${{ secrets.OWNLOCK_PASSPHRASE }}
+```
+
+Store the encrypted `vault.db` as a base64 blob in your secrets manager, rotate via `ownlock rekey`, and never commit `.ownlock/`.
+
+**Pre-commit locally + CI scan** — belt and suspenders:
+
+```bash
+ownlock install-hook          # local: ownlock scan on every commit
+# CI: ownlock scan . --yes    # catches anything that bypassed the hook
+```
+
+### What to commit vs keep local
+
+| Commit to git | Keep local only |
+|---------------|-----------------|
+| `.env` with `vault("KEY")` references | `.ownlock/vault.db` (encrypted secrets) |
+| `*.template.*` files with `{{vault("KEY")}}` | Plaintext `.env` backups under `.ownlock/backups/` |
+| Application code that reads standard env vars | `OWNLOCK_PASSPHRASE` (use keyring locally, runner secret in CI) |
 
 ---
 

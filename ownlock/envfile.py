@@ -28,9 +28,8 @@ from typing import Iterator
 from ownlock.paths import is_valid_secret_name
 from ownlock.vault import VaultManager
 
-# Loose pattern: any literal ``vault(`` is enough to flag a file as "bootstrap"
-# shape. The full parse is left to :mod:`ownlock.resolver` once we commit to
-# that path; classification only needs to decide which workflow to run.
+# Loose pattern kept for documentation; classification uses
+# :func:`ownlock.resolver.collect_vault_refs` for accuracy.
 _VAULT_CALL_HINT = re.compile(r"\bvault\s*\(")
 
 
@@ -54,8 +53,9 @@ def classify_env_file(env_file: Path) -> str:
     """
     if not env_file.exists():
         return "empty"
-    text = env_file.read_text(encoding="utf-8", errors="ignore")
-    if _VAULT_CALL_HINT.search(text):
+    from ownlock.resolver import collect_vault_refs
+
+    if collect_vault_refs(env_file):
         return "bootstrap"
     for _ in iter_env_kv_pairs(env_file):
         return "seed"

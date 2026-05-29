@@ -41,7 +41,7 @@ runner = CliRunner()
 def global_vault(tmp_path):
     """Create a vault in tmp_path and patch GLOBAL_VAULT_PATH in resolver."""
     db = tmp_path / "global" / "vault.db"
-    with patch("ownlock.resolver.GLOBAL_VAULT_PATH", db):
+    with patch("ownlock.vault.GLOBAL_VAULT_PATH", db):
         with VaultManager(db, PASSPHRASE) as vm:
             yield vm, db
 
@@ -395,7 +395,7 @@ def cli_vault(tmp_path, monkeypatch):
     monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
     monkeypatch.setattr("ownlock.vault.GLOBAL_VAULT_PATH", vault_db)
     monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
-    monkeypatch.setattr("ownlock.resolver.GLOBAL_VAULT_PATH", vault_db)
+    monkeypatch.setattr("ownlock.vault.GLOBAL_VAULT_PATH", vault_db)
     monkeypatch.setattr(
         "ownlock.vault.VaultManager.find_project_vault",
         staticmethod(lambda: None),

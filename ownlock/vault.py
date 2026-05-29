@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, UTC
 from pathlib import Path
@@ -72,6 +73,11 @@ class VaultManager:
         self._conn.execute(_CREATE_META)
         self._conn.commit()
         self._ensure_meta(is_new=is_new)
+        if os.name == "posix" and self._db_path.exists():
+            try:
+                os.chmod(self._db_path, 0o600)
+            except OSError:
+                pass
 
     def _apply_concurrency_pragmas(self) -> None:
         """Switch SQLite to WAL with a generous busy-timeout.

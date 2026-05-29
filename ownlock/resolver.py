@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from ownlock.vault import VaultManager, GLOBAL_VAULT_PATH
+from ownlock import vault as _vault_module
+from ownlock.vault import VaultManager
 
 # vault() reference: "vault(" + quoted name + optional kwargs blob + ")"
 # Kwargs are parsed by KWARG_RE so they may appear in any order. The outer
@@ -92,7 +93,9 @@ class VaultLookup:
             value = self._project_vm.get(name, env)
         else:
             if self._global_vm is None:
-                self._global_vm = VaultManager(GLOBAL_VAULT_PATH, self._passphrase)
+                self._global_vm = VaultManager(
+                    _vault_module.GLOBAL_VAULT_PATH, self._passphrase
+                )
                 self._global_vm.open()
             value = self._global_vm.get(name, env)
 

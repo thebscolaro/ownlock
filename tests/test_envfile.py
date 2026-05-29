@@ -49,6 +49,15 @@ class TestClassifyEnvFile:
         p.write_text("HASHICORP_VAULT_TOKEN=hvs.abcdefghij\n")
         assert classify_env_file(p) == "seed"
 
+    def test_comment_with_vault_example_does_not_trigger_bootstrap(self, tmp_path: Path) -> None:
+        """A commented-out vault() example must not flip routing to bootstrap."""
+        p = tmp_path / ".env"
+        p.write_text(
+            "# TOKEN=vault(\"TOKEN\")\n"
+            "REAL_KEY=real-value\n"
+        )
+        assert classify_env_file(p) == "seed"
+
 
 def test_default_env_candidates_is_a_tuple_of_strings() -> None:
     assert isinstance(DEFAULT_ENV_FILE_CANDIDATES, tuple)

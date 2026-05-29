@@ -16,7 +16,7 @@ PASSPHRASE = "test-pass"
 def global_vault(tmp_path):
     """Create a global vault in tmp_path and patch GLOBAL_VAULT_PATH."""
     db = tmp_path / "global" / "vault.db"
-    with patch("ownlock.resolver.GLOBAL_VAULT_PATH", db):
+    with patch("ownlock.vault.GLOBAL_VAULT_PATH", db):
         with VaultManager(db, PASSPHRASE) as vm:
             yield vm, db
 

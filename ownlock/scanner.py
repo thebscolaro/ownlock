@@ -44,6 +44,22 @@ _SKIP_EXTENSIONS = {
 }
 
 
+def _should_skip_path(file_path: Path) -> bool:
+    """Return True if *file_path* should be excluded from the value scan."""
+    parts = file_path.parts
+    if not any(part in _SKIP_DIRS for part in parts):
+        return False
+    # Plaintext env backups live under .ownlock/backups/ — scan those even
+    # though the parent .ownlock/ dir is otherwise skipped (vault.db, etc.).
+    if ".ownlock" in parts and "backups" in parts:
+        try:
+            backups_idx = parts.index("backups")
+            return backups_idx != len(parts) - 2
+        except ValueError:
+            pass
+    return True
+
+
 @dataclass
 class ScanFinding:
     """One file/line that contains a vault value."""
@@ -98,7 +114,7 @@ def scan_directory(
             continue
         if not file_path.is_file():
             continue
-        if any(part in _SKIP_DIRS for part in file_path.parts):
+        if _should_skip_path(file_path):
             continue
 
         # Plaintext backup written by older ownlock versions: flag and skip

@@ -34,6 +34,14 @@ class TestRedact:
         text = "nothing to hide"
         assert r.redact(text) == text
 
+    def test_inline_env_literals_redacted_when_registered(self):
+        """ownlock run registers every injected env value, not only vault() refs."""
+        r = SecretRedactor({"LEGACY_API_KEY": "sk-live-migration-secret"})
+        assert (
+            r.redact("token=sk-live-migration-secret")
+            == "token=[REDACTED:LEGACY_API_KEY]"
+        )
+
     def test_longer_secrets_replaced_first(self):
         r = SecretRedactor({"SHORT": "abcd1234", "LONG": "abcd1234efgh"})
         result = r.redact("prefix abcd1234efgh suffix")
