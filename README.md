@@ -4,6 +4,11 @@ Lightweight secrets manager — encrypted local vault, `.env` injection, stdout 
 
 No Docker. No cloud account. Just `pip install ownlock`.
 
+**Why teams use it**
+
+- **Works in Cursor / Codex / Claude Code sandboxes** where `export DATABASE_URL=...` in your shell does not cross into the agent's isolated session — `ownlock run` reads the vault from disk and injects secrets into the child process.
+- **Commit `.env` with `vault("KEY")` references** — teammates clone the repo and run `ownlock init` to fill in their local vault; no Slack DMs with secret lists.
+
 ---
 
 ## Quick start
@@ -29,7 +34,7 @@ ownlock run -- python app.py
 
 A surprising practical reason ownlock has stuck for me: **agentic sandboxes**.
 
-Modern coding assistants (Cursor's background agents, OpenAI Codex, Claude Code, etc.) often run inside locked-down sandboxes that start with a fresh shell. Plain environment variables exported in your interactive shell rarely cross that boundary — the agent spawns its own session and your `export DATABASE_URL=...` is gone.
+Modern coding assistants (Cursor's background agents, OpenAI Codex, Claude Code, etc.) often run inside locked-down sandboxes that start with a fresh shell. Plain environment variables exported in your interactive shell rarely cross that boundary — the agent spawns its own session and your `export DATABASE_URL=...` is gone. **`export` and parent-shell env vars do not reach the sandbox**; the vault file on disk does.
 
 `ownlock run` works inside those sandboxes because:
 
@@ -108,7 +113,7 @@ ownlock import .env --values-from values.json  # non-interactive bootstrap
 
 | Command | Effect |
 |---------|--------|
-| `ownlock init` | Project vault at `./.ownlock/vault.db`. First run also creates the global vault and stores the passphrase in the keyring. |
+| `ownlock init` | Project vault at `./.ownlock/vault.db`. First run also creates the global vault and stores the passphrase in the keyring. **If a `.env` is in cwd, init offers to import secrets and rewrite the file to `vault(...)` references.** |
 | `ownlock init --global` | Global vault only at `~/.ownlock/vault.db` (passphrase in keyring). |
 
 ```bash
@@ -116,6 +121,8 @@ ownlock init
 # or global only:
 ownlock init --global
 ```
+
+**Teammate onboarding:** commit `.env` with lines like `API_KEY=vault("API_KEY")`. After clone, each dev runs `ownlock init` once — ownlock detects the references and prompts only for the keys missing from their local vault.
 
 ---
 
@@ -360,13 +367,11 @@ Example: `web.config` stays untouched and relies on standard transforms for `Log
 
 Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan`, `rekey`, `share`, `import-share`, and `export --example` to override vault selection.
 
-> `ownlock auto` and `ownlock bootstrap` from 0.1 still work as hidden aliases for `ownlock import --rewrite` and `ownlock import` respectively. They will be removed in a future release.
-
 ---
 
 ## How it works
 
-- Secrets are encrypted with **AES-256-GCM** before storage; key derivation uses **PBKDF2-HMAC-SHA256**. Iteration counts and ciphertext format are documented in [SECURITY.md](SECURITY.md).
+- Secrets are encrypted with **AES-256-GCM** before storage; key derivation uses **PBKDF2-HMAC-SHA256**. Secret **names** are encrypted too (schema v3): the database stores an HMAC lookup id plus encrypted name blobs, so copying `vault.db` without the passphrase does not reveal key names like `API_KEY`. Iteration counts and ciphertext format are documented in [SECURITY.md](SECURITY.md).
 - The vault is a local SQLite file. No network; everything stays local.
 - `ownlock run` resolves `vault()` in `.env`, injects the resolved values into one child process, and redacts those values from the child's stdout/stderr. The master passphrase is **not** passed to the child.
 
