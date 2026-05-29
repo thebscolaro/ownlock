@@ -858,7 +858,8 @@ class TestRewriteEnv:
         result = runner.invoke(app, ["scan", str(tmp_path)])
         assert result.exit_code == 1
         assert "legacy plaintext backup" in result.output.lower()
-        assert ".env.ownlock.bak" in result.output
+        # Rich may wrap long paths across lines on narrow terminals (CI).
+        assert "ownlock.bak" in result.output.replace("\n", "")
 
 
 class TestExport:

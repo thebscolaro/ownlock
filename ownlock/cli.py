@@ -358,7 +358,7 @@ def _read_value_from_editor(name: str) -> str:
                 pass
 
         # shlex.split lets users put flags in $EDITOR (e.g. "code --wait").
-        argv = shlex.split(editor) + [tmp_name]
+        argv = shlex.split(editor, posix=(os.name != "nt")) + [tmp_name]
         subprocess.run(argv, check=True)  # noqa: S603 (argv list, no shell)
 
         return Path(tmp_name).read_text(encoding="utf-8")
