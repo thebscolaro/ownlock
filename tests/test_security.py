@@ -108,6 +108,52 @@ class TestSubprocessWithoutShell:
                 assert cmd == ["echo", "hi"]
 
 
+class TestPassphraseNotInheritedByChild:
+    """OWNLOCK_PASSPHRASE must never reach a child process spawned by run."""
+
+    def test_passphrase_stripped_from_child_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", "super-secret-passphrase")
+        monkeypatch.setenv("OWNLOCK_NEW_PASSPHRASE", "rotation-target")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        with patch("ownlock.redactor.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            red = SecretRedactor({"API_KEY": "resolved-secret-value"})
+            red.run_process(["echo", "hi"], {"API_KEY": "resolved-secret-value"})
+
+        env_passed = mock_popen.call_args.kwargs["env"]
+        assert "OWNLOCK_PASSPHRASE" not in env_passed
+        assert "OWNLOCK_NEW_PASSPHRASE" not in env_passed
+        # Resolved secrets the user wanted to inject still get through.
+        assert env_passed["API_KEY"] == "resolved-secret-value"
+        # Non-sensitive parent env is preserved.
+        assert env_passed.get("PATH") == "/usr/bin"
+
+    def test_explicit_env_can_set_ownlock_passphrase_for_legitimate_use(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 1.1 strips the parent env only; a caller that explicitly passes
+        OWNLOCK_PASSPHRASE in *env* (e.g. ownlock spawning ownlock for rekey)
+        still gets it through. The strip is about inheritance, not censorship."""
+        monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
+
+        with patch("ownlock.redactor.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+            red = SecretRedactor({})
+            red.run_process(["echo", "hi"], {"OWNLOCK_PASSPHRASE": "explicit"})
+
+        env_passed = mock_popen.call_args.kwargs["env"]
+        assert env_passed["OWNLOCK_PASSPHRASE"] == "explicit"
+
+
 class TestMcpDelegatesSubprocess:
     """MCP server must not invoke a shell when forwarding to ownlock."""
 

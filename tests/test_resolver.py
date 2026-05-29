@@ -16,7 +16,7 @@ PASSPHRASE = "test-pass"
 def global_vault(tmp_path):
     """Create a global vault in tmp_path and patch GLOBAL_VAULT_PATH."""
     db = tmp_path / "global" / "vault.db"
-    with patch("ownlock.resolver.GLOBAL_VAULT_PATH", db):
+    with patch("ownlock.vault.GLOBAL_VAULT_PATH", db):
         with VaultManager(db, PASSPHRASE) as vm:
             yield vm, db
 
@@ -147,6 +147,45 @@ class TestVaultReference:
         env_file.write_text('KEY=vault("NOPE")\n')
         with pytest.raises(KeyError, match="NOPE"):
             resolve_env_file(env_file, PASSPHRASE)
+
+
+class TestKwargOrderInVaultRef:
+    """vault() kwargs accept any order — env=, project=, global= are interchangeable."""
+
+    def test_project_before_env(self, tmp_path, project_vault, global_vault):
+        proj_vm, proj_db = project_vault
+        proj_vm.set("KEY", "proj-prod-val", env="production")
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=proj_db,
+        ):
+            env_file = tmp_path / ".env"
+            env_file.write_text(
+                'A=vault("KEY", project=true, env="production")\n'
+            )
+            resolved, _ = resolve_env_file(env_file, PASSPHRASE)
+            assert resolved["A"] == "proj-prod-val"
+
+    def test_global_before_env(self, tmp_path, project_vault, global_vault):
+        glob_vm, _ = global_vault
+        glob_vm.set("K", "global-stage", env="staging")
+
+        with patch(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            return_value=None,
+        ):
+            env_file = tmp_path / ".env"
+            env_file.write_text('B=vault("K", global=true, env="staging")\n')
+            resolved, _ = resolve_env_file(env_file, PASSPHRASE)
+            assert resolved["B"] == "global-stage"
+
+    def test_kwarg_parser_accepts_arbitrary_order(self):
+        from ownlock.resolver import parse_vault_kwargs
+
+        a = parse_vault_kwargs('env="prod", project=true')
+        b = parse_vault_kwargs('project=true, env="prod"')
+        assert a == b == {"env": "prod", "project": "true"}
 
 
 class TestSecretNames:

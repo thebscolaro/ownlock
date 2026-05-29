@@ -23,6 +23,15 @@ def _fake_home(tmp_path: Path) -> Path:
     return home
 
 
+def _ensure_global_vault(home: Path, passphrase: str = PASS) -> Path:
+    """Pre-create global vault so subprocess ``init`` does not prompt for a new passphrase."""
+    vault_path = home / ".ownlock" / "vault.db"
+    if not vault_path.exists():
+        vault_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(vault_path, passphrase).close()
+    return vault_path
+
+
 def _subprocess_env(home: Path, passphrase: str = PASS) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -130,3 +139,61 @@ def test_smoke_mcp_version_matches_package() -> None:
     from ownlock.mcp_server import ownlock_version
 
     assert ownlock_version() == pkg_version("ownlock")
+
+
+@pytest.mark.smoke
+def test_smoke_import_rewrite_seeds_vault_and_rewrites_env(tmp_path: Path) -> None:
+    """import --rewrite via real subprocess: vault populated + .env on vault() syntax."""
+    home = _fake_home(tmp_path)
+    _ensure_global_vault(home)
+    project = tmp_path / "importproj"
+    project.mkdir()
+    env_file = project / ".env"
+    env_file.write_text("SMOKE_IMPORT_KEY=smoke-import-value\n")
+
+    proc = _run_cli(
+        "import",
+        str(env_file),
+        "--rewrite",
+        "--yes",
+        cwd=project,
+        home=home,
+    )
+    assert proc.returncode == 0, _cli_output(proc)
+
+    # No project vault yet — import uses the global vault in isolated HOME.
+    pv = home / ".ownlock" / "vault.db"
+    assert pv.exists()
+    with VaultManager(pv, PASS) as vm:
+        assert vm.get("SMOKE_IMPORT_KEY") == "smoke-import-value"
+    assert 'SMOKE_IMPORT_KEY=vault("SMOKE_IMPORT_KEY")' in env_file.read_text()
+
+
+@pytest.mark.smoke
+def test_smoke_rekey_upgrades_vault(tmp_path: Path) -> None:
+    """rekey --upgrade-kdf via real subprocess leaves secrets readable."""
+    home = _fake_home(tmp_path)
+    _ensure_global_vault(home)
+    project = tmp_path / "rekeyproj"
+    project.mkdir()
+
+    init_proc = _run_cli("init", cwd=project, home=home)
+    assert init_proc.returncode == 0, _cli_output(init_proc)
+
+    set_proc = _run_cli("set", "REKEY_ME=rekey-value", cwd=project, home=home)
+    assert set_proc.returncode == 0, _cli_output(set_proc)
+
+    rekey_proc = _run_cli(
+        "rekey",
+        "--upgrade-kdf",
+        "--yes",
+        cwd=project,
+        home=home,
+    )
+    assert rekey_proc.returncode == 0, _cli_output(rekey_proc)
+
+    pv = project / ".ownlock" / "vault.db"
+    with VaultManager(pv, PASS) as vm:
+        assert vm.get("REKEY_ME") == "rekey-value"
+        assert vm.schema_version() == 3
+        assert vm.kdf_iterations() == 600_000

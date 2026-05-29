@@ -5,6 +5,51 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-28
+
+### Security
+
+- **`OWNLOCK_PASSPHRASE` is no longer inherited by `ownlock run` children**. Pre-0.2.0 a child process spawned by `run` could read the master passphrase from its own environment and decrypt the entire vault by re-spawning `ownlock`. The passphrase (and `OWNLOCK_NEW_PASSPHRASE`) are now stripped from the child env before the resolved secret values are layered on top. Regression test in `tests/test_security.py`.
+- **PBKDF2 default raised from 200,000 to 600,000 iterations** (OWASP 2023 guidance for PBKDF2-SHA256). Existing vaults keep working; upgrade with `ownlock rekey --upgrade-kdf`.
+- **Versioned ciphertext format**: each stored value carries a small format prefix (v1 legacy, v2 with embedded iteration count) so a vault can hold a mix during a partial migration. `decrypt` auto-detects.
+- **Vault metadata**: new `meta` table records `schema_version`, `kdf_algo`, `kdf_iterations`, `created_at`. `ownlock doctor` reads it without needing the passphrase.
+- **Encrypted secret names (schema v3)**: secret names are no longer stored in cleartext in `vault.db`. Rows are keyed by an HMAC lookup id; names are AES-GCM ciphertext. Legacy v1/v2 vaults auto-migrate on first open with your passphrase.
+- **`.ownlock.bak` files are gone**: backups (env-rewrite and vault snapshots) live under `.ownlock/backups/` with mode `0600`. `.ownlock/` is gitignored by default. `ownlock scan` and `ownlock doctor` flag any leftover legacy `.ownlock.bak` files.
+- **Stdout redaction matches encoded variants**: a secret is now also redacted when it appears in the child's stdout/stderr as base64, URL-encoded, or JSON-string-escaped. Values shorter than 8 chars are skipped to keep redaction signal-to-noise high.
+- **WAL mode + 5s busy-timeout**: SQLite vaults now open in WAL mode, so two `ownlock` processes (e.g. an agent and a developer in another shell) can read and write the same vault file safely. `rekey`'s vault snapshot also captures the WAL/SHM sidecars so a hard-killed prior writer's pending bytes are restorable.
+
+### Added
+
+- **`ownlock rekey`** — re-encrypt the entire vault under a new passphrase (`--rotate-passphrase`) and/or a new KDF iteration count (`--upgrade-kdf`). Single SQL transaction; the live file is untouched until commit; a 0600 backup is left under `.ownlock/backups/`.
+- **`ownlock import` is now the single entry point** for getting secrets into the vault. Auto-detects the file shape and routes accordingly:
+  - Plain `KEY=VALUE` → seed flow (with optional `--rewrite` to also rewrite the file in place to use `vault(...)`).
+  - Already on `vault(...)` references → vault_refs flow that prompts only for the keys missing from the local vault. Pair with `--values-from JSON` for non-interactive runs.
+- **`ownlock init` walks new users through onboarding**: when a `.env` is present in cwd, it offers to import secrets (and rewrite to vault references) on the spot — that's the entire flow for a teammate cloning the repo.
+- **`ownlock share` / `ownlock import-share`** — encrypted JSON bundles for handing real secret values to a teammate. Bundle is encrypted with a separate passphrase from the local vault, so the bundle file and the recipient's vault have independent access boundaries.
+- **`ownlock set --from-file PATH` / `--editor`** — multi-line / file-based secret entry (PEM keys, JSON service-account files, etc.). `--strip` controls trailing whitespace handling.
+- **`ownlock completion {bash,zsh,fish,pwsh,powershell}`** — print a shell completion script.
+- **`ownlock install-hook`** — install a pre-commit hook (or append to `.pre-commit-config.yaml`) that runs `ownlock scan` on every commit.
+- **`ownlock_doctor` and `ownlock_status` MCP tools** — both delegate to the CLI subprocess; no decryption in the MCP process.
+- **`ownlock doctor`** now reports schema version, KDF iterations, secret-iteration histogram, legacy backup files, and `.ownlock-tmp` leftovers.
+- **Opt-in audit log**: set `OWNLOCK_AUDIT=1` to write a JSONL line per write op (`init` / `set` / `delete` / `import` / `rekey` / `share` / `import-share`) to `.ownlock/audit.log`. **Names only, never values.**
+
+### Changed
+
+- **Removed `ownlock auto` and `ownlock bootstrap`** (0.1 commands). Use `ownlock import` and `ownlock import --rewrite` instead.
+- **`ownlock import` interactive UX**: cyan numbered pickers for env files and keys (restores the old `auto` feel), multi-file discovery picker when several `.env*` files exist, and clearer rewrite output with file links plus backup on its own line.
+- **`ownlock doctor`**: no longer crashes when the optional `mcp` package is not installed (`mcp_importable` reports `false` instead).
+- **Refactor**: `cli.py` and `vault.py` split into smaller, focused modules — `paths.py`, `envfile.py`, `backups.py`, `scanner.py`, `doctor.py`, `audit.py`. Most commands now compose helpers from these modules instead of inlining the logic.
+
+### Documentation
+
+- **[README.md](README.md)** — new "ownlock + your AI coding assistant" section explaining why `ownlock run` works inside agentic sandboxes (Cursor background agents, Codex, Claude Code) where regular shell exports don't cross the sandbox boundary; new sections for "Get secrets into the vault" (unified `import`), "Onboarding a teammate" (placeholders vs. encrypted-bundle handoff), "Upgrading a vault" (`rekey`), and "Pairs with your CI / cloud secrets manager" (boundary with Harness / Doppler / GH Secrets / etc.). Crypto details moved to SECURITY.md.
+- **[SECURITY.md](SECURITY.md)** — now the authoritative source for cryptographic details: AES-256-GCM, PBKDF2-HMAC-SHA256 iteration history (200k → 600k), versioned ciphertext format, vault meta table, `run` passphrase isolation, encrypted-bundle mechanics, WAL mode + concurrency.
+
+### CI
+
+- **Test job split**: fast unit tests (`-m "not smoke"`) run on Linux 3.11 + 3.12, macOS 3.12, Windows 3.12. Subprocess smoke tests run as a separate single-OS job so a flaky smoke test can't block PR feedback.
+- **Coverage gate**: ubuntu / Python 3.12 runs `pytest-cov` with `fail_under=84` and uploads an HTML report artifact (`coverage-html`).
+
 ## [0.1.11] - 2026-04-27
 
 ### Fixed

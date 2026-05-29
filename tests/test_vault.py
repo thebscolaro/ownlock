@@ -1,8 +1,19 @@
 """Tests for ownlock.vault — SQLite-backed encrypted secret storage."""
 
+import sqlite3
+
 import pytest
 
-from ownlock.vault import VaultManager
+from ownlock.crypto import (
+    KDF_ITERATIONS_CURRENT,
+    KDF_ITERATIONS_LEGACY,
+    encrypt,
+    token_iterations,
+)
+from ownlock.vault import (
+    SCHEMA_VERSION_CURRENT,
+    VaultManager,
+)
 
 
 PASSPHRASE = "test-pass"
@@ -102,3 +113,239 @@ class TestInitVault:
             assert db.exists()
         finally:
             vm.close()
+
+
+class TestMeta:
+    def test_new_vault_writes_current_meta(self, tmp_path):
+        db = tmp_path / "v.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            meta = vm.get_meta()
+        assert meta["schema_version"] == str(SCHEMA_VERSION_CURRENT)
+        assert meta["kdf_algo"] == "PBKDF2-HMAC-SHA256"
+        assert meta["kdf_iterations"] == str(KDF_ITERATIONS_CURRENT)
+        assert "created_at" in meta
+
+    def test_legacy_vault_without_meta_is_inferred_as_v1(self, tmp_path):
+        """A vault file without a meta table (pre-0.2.0) is treated as v1
+        with legacy KDF iterations, and the inferred meta is persisted."""
+        db = tmp_path / "legacy.db"
+        # Build a vault that looks pre-0.2.0: secrets table only, no meta.
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE secrets ("
+            "  name TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'default', "
+            "  value_enc TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "  updated_at TEXT NOT NULL, PRIMARY KEY (name, env))"
+        )
+        conn.commit()
+        conn.close()
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            # Opening a legacy vault infers v1 KDF meta, then auto-migrates names
+            # to schema v3 on first open with the passphrase.
+            assert vm.schema_version() == SCHEMA_VERSION_CURRENT
+            assert vm.kdf_iterations() == KDF_ITERATIONS_LEGACY
+
+    def test_legacy_v1_token_decrypts_after_meta_migration(self, tmp_path):
+        """A v1 ciphertext written by old ownlock still decrypts."""
+        # Hand-craft a v1 token at legacy iterations and store it directly.
+        db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE secrets ("
+            "  name TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'default', "
+            "  value_enc TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "  updated_at TEXT NOT NULL, PRIMARY KEY (name, env))"
+        )
+        # Create a v1 token by manually building it (no v2 prefix).
+        import base64
+        import os as _os
+
+        from ownlock.crypto import (
+            NONCE_LEN,
+            SALT_LEN,
+            derive_key,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        plaintext = "legacy-secret-value"
+        salt = _os.urandom(SALT_LEN)
+        nonce = _os.urandom(NONCE_LEN)
+        key = derive_key(PASSPHRASE, salt, KDF_ITERATIONS_LEGACY)
+        ct = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), None)
+        v1_token = base64.b64encode(salt + nonce + ct).decode("ascii")
+        conn.execute(
+            "INSERT INTO secrets (name, env, value_enc, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("LEGACY_KEY", "default", v1_token, "2025-01-01", "2025-01-01"),
+        )
+        conn.commit()
+        conn.close()
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            assert vm.get("LEGACY_KEY") == plaintext
+            assert vm.schema_version() == SCHEMA_VERSION_CURRENT
+
+    def test_set_writes_v2_token(self, tmp_path):
+        db = tmp_path / "v2.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("KEY", "value")
+            row = vm._require_conn().execute(
+                "SELECT value_enc FROM secrets LIMIT 1"
+            ).fetchone()
+            assert token_iterations(row["value_enc"]) == KDF_ITERATIONS_CURRENT
+
+    def test_secret_names_not_stored_in_plaintext(self, tmp_path):
+        """Schema v3: copying vault.db without the passphrase hides key names."""
+        db = tmp_path / "hidden.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("API_KEY", "super-secret-value-long")
+
+        raw = db.read_bytes()
+        assert b"API_KEY" not in raw
+        assert b"super-secret-value-long" not in raw
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            assert vm.get("API_KEY") == "super-secret-value-long"
+
+
+class TestRekey:
+    def test_rekey_changes_passphrase(self, tmp_path):
+        db = tmp_path / "rk.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("A", "1")
+            vm.set("B", "2", env="prod")
+            count = vm.rekey("new-passphrase")
+            assert count == 2
+            assert vm.get("A") == "1"
+            assert vm.get("B", env="prod") == "2"
+
+        # Old passphrase no longer resolves rows (lookup ids are passphrase-bound).
+        with VaultManager(db, PASSPHRASE) as vm:
+            assert vm.get("A") is None
+            assert vm.get("B", env="prod") is None
+
+        # New passphrase reads everything.
+        with VaultManager(db, "new-passphrase") as vm:
+            assert vm.get("A") == "1"
+            assert vm.get("B", env="prod") == "2"
+
+    def test_upgrade_kdf_only(self, tmp_path):
+        """Rekey with same passphrase but bumped iterations re-encrypts at v2/current."""
+        from ownlock.crypto import secret_name_lookup
+
+        db = tmp_path / "kdf.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("LEGACY", "v1-data")
+            lookup = secret_name_lookup(PASSPHRASE, "LEGACY", "default")
+            legacy_token = encrypt("v1-data", PASSPHRASE, iterations=KDF_ITERATIONS_LEGACY)
+            vm._require_conn().execute(
+                "UPDATE secrets SET value_enc = ? WHERE name_lookup = ?",
+                (legacy_token, lookup),
+            )
+            vm._require_conn().commit()
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            count = vm.rekey(PASSPHRASE, target_iterations=KDF_ITERATIONS_CURRENT)
+            assert count == 1
+            row = vm._require_conn().execute(
+                "SELECT value_enc FROM secrets LIMIT 1"
+            ).fetchone()
+            assert token_iterations(row["value_enc"]) == KDF_ITERATIONS_CURRENT
+            assert vm.get("LEGACY") == "v1-data"
+            assert vm.kdf_iterations() == KDF_ITERATIONS_CURRENT
+            assert vm.schema_version() == SCHEMA_VERSION_CURRENT
+
+    def test_rekey_with_wrong_passphrase_leaves_vault_untouched(self, tmp_path):
+        from cryptography.exceptions import InvalidTag
+
+        db = tmp_path / "fail.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("KEEP", "original")
+            # Open with wrong passphrase and try to rekey — should fail and roll back.
+        with VaultManager(db, "wrong") as vm:
+            with pytest.raises(InvalidTag):
+                vm.rekey("anything")
+
+        # Original data still intact under the original passphrase.
+        with VaultManager(db, PASSPHRASE) as vm:
+            assert vm.get("KEEP") == "original"
+
+    def test_rekey_idempotent_when_already_current(self, tmp_path):
+        db = tmp_path / "i.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("X", "y")
+            first = vm.secret_iterations_summary()
+            assert first == {KDF_ITERATIONS_CURRENT: 1}
+            vm.rekey(PASSPHRASE, target_iterations=KDF_ITERATIONS_CURRENT)
+            second = vm.secret_iterations_summary()
+            assert second == {KDF_ITERATIONS_CURRENT: 1}
+            # Value still readable
+            assert vm.get("X") == "y"
+
+
+class TestConcurrencyPragmas:
+    """WAL + busy-timeout: two ownlock processes can share a vault file safely."""
+
+    def test_journal_mode_is_wal(self, tmp_path):
+        db = tmp_path / "wal.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            mode = vm._require_conn().execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode.lower() == "wal"
+
+    def test_busy_timeout_is_set(self, tmp_path):
+        db = tmp_path / "busy.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            timeout = vm._require_conn().execute("PRAGMA busy_timeout").fetchone()[0]
+            assert timeout >= 5000
+
+    def test_synchronous_is_normal_or_higher(self, tmp_path):
+        db = tmp_path / "sync.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            sync = vm._require_conn().execute("PRAGMA synchronous").fetchone()[0]
+            # 0 = OFF, 1 = NORMAL, 2 = FULL, 3 = EXTRA. NORMAL is what we set.
+            assert sync >= 1
+
+    def test_close_checkpoints_wal_into_main_file(self, tmp_path):
+        """After clean close the main DB should contain the writes.
+
+        Open a second sqlite3 connection without any of our pragmas and
+        confirm the row is visible — proves the checkpoint happened.
+        """
+        db = tmp_path / "ckpt.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("CHECKPOINT_TEST", "ok")
+        # Bypass VaultManager so we read the raw file as-is.
+        raw = sqlite3.connect(str(db))
+        try:
+            count = raw.execute("SELECT COUNT(*) FROM secrets").fetchone()[0]
+            assert count == 1
+        finally:
+            raw.close()
+
+    def test_two_simultaneous_managers_can_write(self, tmp_path):
+        """A second VaultManager opened on the same file mid-flight can still write.
+
+        Pre-WAL this would fail with ``sqlite3.OperationalError: database is locked``
+        on most platforms because the first writer's transaction blocked all reads.
+        """
+        db = tmp_path / "concur.db"
+        with VaultManager(db, PASSPHRASE) as a:
+            a.set("FIRST", "1")
+            with VaultManager(db, PASSPHRASE) as b:
+                b.set("SECOND", "2")
+                assert b.get("FIRST") == "1"
+            # Original handle still works after the second one closed.
+            a.set("THIRD", "3")
+            assert a.get("SECOND") == "2"
+            assert a.get("THIRD") == "3"
+
+    def test_vault_db_created_with_mode_0600_on_posix(self, tmp_path):
+        import os
+
+        if os.name != "posix":
+            pytest.skip("POSIX file modes only")
+        db = tmp_path / "perms.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("K", "v")
+        assert db.stat().st_mode & 0o777 == 0o600

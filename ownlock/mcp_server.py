@@ -128,6 +128,100 @@ def ownlock_version() -> str:
     return version("ownlock")
 
 
+@mcp.tool()
+def ownlock_doctor(cwd: Optional[str] = None) -> dict[str, Any]:
+    """Run `ownlock doctor --json` in a subprocess. Returns vault paths, schema/KDF status, passphrase source — never decrypted values. The MCP process itself does not open the vault."""
+    import json as _json
+
+    resolved = _resolve_cwd(cwd)
+    try:
+        proc = _run_ownlock(["doctor", "--json"], cwd=resolved, timeout=30.0)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"error": str(e)}
+    if proc.returncode != 0:
+        return {
+            "error": f"ownlock doctor failed (exit {proc.returncode})",
+            "stderr": _truncate(proc.stderr or ""),
+        }
+    try:
+        return _json.loads(proc.stdout)
+    except _json.JSONDecodeError as e:
+        return {
+            "error": f"could not parse doctor JSON: {e}",
+            "stdout": _truncate(proc.stdout or ""),
+        }
+
+
+@mcp.tool()
+def ownlock_status(
+    cwd: Optional[str] = None,
+    env: Optional[str] = None,
+    global_vault: bool = False,
+    project: bool = False,
+) -> dict[str, Any]:
+    """Quick vault summary: which vault is in use, secret count, environments. Wraps `ownlock list --json` and `ownlock doctor --json` (subprocess); no decryption in this process."""
+    import json as _json
+
+    resolved = _resolve_cwd(cwd)
+    list_args = ["list", "--json"]
+    if env is not None:
+        list_args.extend(["--env", env])
+    if global_vault:
+        list_args.append("--global")
+    if project:
+        list_args.append("--project")
+
+    try:
+        list_proc = _run_ownlock(list_args, cwd=resolved, timeout=30.0)
+        doctor_proc = _run_ownlock(["doctor", "--json"], cwd=resolved, timeout=30.0)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"error": str(e)}
+
+    rows: list[dict[str, Any]] = []
+    if list_proc.returncode == 0:
+        try:
+            rows = _json.loads(list_proc.stdout)
+        except _json.JSONDecodeError:
+            pass
+
+    info: dict[str, Any] = {}
+    if doctor_proc.returncode == 0:
+        try:
+            info = _json.loads(doctor_proc.stdout)
+        except _json.JSONDecodeError:
+            pass
+
+    project_vault = info.get("project_vault") or {}
+    global_vault_info = info.get("global_vault") or {}
+    selected = "global"
+    if not global_vault and (project or project_vault.get("exists")):
+        selected = "project"
+
+    envs = sorted({row["env"] for row in rows if isinstance(row, dict) and "env" in row})
+
+    return {
+        "selected_vault": selected,
+        "vault_path": (
+            project_vault.get("path") if selected == "project" else global_vault_info.get("path")
+        ),
+        "secret_count": len(rows),
+        "environments": envs,
+        "schema_version": (
+            project_vault.get("schema_version") if selected == "project"
+            else global_vault_info.get("schema_version")
+        ),
+        "kdf_iterations": (
+            project_vault.get("kdf_iterations") if selected == "project"
+            else global_vault_info.get("kdf_iterations")
+        ),
+        "kdf_stale": (
+            project_vault.get("kdf_stale") if selected == "project"
+            else global_vault_info.get("kdf_stale")
+        ),
+        "passphrase_source": info.get("passphrase_source"),
+    }
+
+
 def main() -> None:
     """Stdio MCP entrypoint for IDEs (e.g. Cursor)."""
     mcp.run()
