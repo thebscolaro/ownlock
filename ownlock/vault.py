@@ -371,7 +371,7 @@ class VaultManager:
         for row in rows:
             try:
                 iters = token_iterations(row["value_enc"])
-            except Exception:
+            except (ValueError, KeyError):
                 continue
             summary[iters] = summary.get(iters, 0) + 1
         return summary

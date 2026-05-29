@@ -1011,12 +1011,23 @@ class TestCompletion:
 
     @pytest.mark.parametrize("shell", ["bash", "zsh", "fish", "pwsh"])
     def test_completion_prints_script(self, shell):
+        from click.shell_completion import get_completion_class
+        from typer.main import get_command
+
+        click_shell = "powershell" if shell == "pwsh" else shell
+        if get_completion_class(click_shell) is None:
+            pytest.skip(f"Click has no completion class for {shell} on this platform")
+
         result = runner.invoke(app, ["completion", shell])
         assert result.exit_code == 0, result.output
         assert "ownlock" in result.output.lower()
         assert "_OWNLOCK_COMPLETE" in result.output
 
     def test_completion_powershell_alias(self):
+        from click.shell_completion import get_completion_class
+
+        if get_completion_class("powershell") is None:
+            pytest.skip("PowerShell completion not available on this platform")
         a = runner.invoke(app, ["completion", "pwsh"]).output
         b = runner.invoke(app, ["completion", "powershell"]).output
         assert a == b

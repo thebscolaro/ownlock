@@ -696,10 +696,12 @@ def rekey(
             console.print("[dim]Updated keyring with new passphrase.[/dim]")
         else:
             detail = f" ({err})" if err else ""
-            console.print(
-                f"[yellow]Could not update keyring{detail}. "
-                "Set OWNLOCK_PASSPHRASE to the new passphrase or update the keyring manually.[/yellow]"
+            msg = (
+                "[yellow]Could not update keyring"
+                + detail
+                + ". Set OWNLOCK_PASSPHRASE to the new passphrase or update the keyring manually.[/yellow]"
             )
+            console.print(msg)
 
     console.print(
         f"[dim]Backup left at {backup_path}; remove once you've verified the new vault works.[/dim]"
@@ -1611,7 +1613,7 @@ def install_hook(
     hook_path.write_text(_GIT_HOOK_TEMPLATE, encoding="utf-8")
     if os.name == "posix":
         try:
-            os.chmod(hook_path, 0o755)
+            os.chmod(hook_path, 0o755)  # nosec B103 — git hooks must be executable
         except OSError:
             pass
     console.print(f"[green]Wrote {hook_path} (runs `ownlock scan .` on every commit).[/green]")

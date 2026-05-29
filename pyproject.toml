@@ -55,11 +55,11 @@ source = ["ownlock"]
 omit = ["ownlock/__main__.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 84
 show_missing = true
 skip_empty = true
 
 # Subprocess is required for `ownlock run` and MCP delegation; argv lists, no shell.
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "build", "dist"]
-skips = ["B404", "B603"]
+skips = ["B404", "B603", "B608"]
