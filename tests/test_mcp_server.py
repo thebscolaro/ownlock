@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -174,6 +175,46 @@ def test_ownlock_argv_uses_python_module_when_no_exe(monkeypatch: pytest.MonkeyP
     argv = mcp_server._ownlock_argv()
     assert argv[0] == mcp_server.sys.executable
     assert argv[1:3] == ["-m", "ownlock"]
+
+
+def test_ownlock_list_secret_names_project_flag(mock_run: MagicMock) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+    mcp_server.ownlock_list_secret_names(project=True)
+    assert mock_run.call_args[0][0] == ["list", "--project"]
+
+
+def test_ownlock_status_uses_project_vault_when_present(mock_run: MagicMock) -> None:
+    list_json = "[]"
+    doctor_json = json.dumps(
+        {
+            "global_vault": {"path": "/g/v.db", "exists": True, "schema_version": 3},
+            "project_vault": {
+                "path": "/p/v.db",
+                "exists": True,
+                "schema_version": 3,
+                "kdf_iterations": 600000,
+                "kdf_stale": False,
+            },
+            "passphrase_source": "env var",
+        }
+    )
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout=list_json, stderr=""),
+        MagicMock(returncode=0, stdout=doctor_json, stderr=""),
+    ]
+    out = mcp_server.ownlock_status()
+    assert out["selected_vault"] == "project"
+    assert out["vault_path"] == "/p/v.db"
+
+
+def test_ownlock_status_tolerates_bad_subprocess_json(mock_run: MagicMock) -> None:
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="not-json", stderr=""),
+        MagicMock(returncode=0, stdout="{also bad", stderr=""),
+    ]
+    out = mcp_server.ownlock_status()
+    assert out["secret_count"] == 0
+    assert out["schema_version"] is None
 
 
 def test_ownlock_doctor_does_not_decrypt() -> None:
