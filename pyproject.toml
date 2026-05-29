@@ -34,6 +34,7 @@ mcp = ["mcp>=1.2.0"]
 dev = [
     "bandit[toml]>=1.7.0",
     "pip-audit>=2.6.0",
+    "pytest-cov>=6.0.0",
 ]
 
 [project.scripts]
@@ -48,6 +49,15 @@ testpaths = ["tests"]
 markers = [
     "smoke: end-to-end subprocess CLI checks (isolated HOME); run with pytest -m smoke or full suite",
 ]
+
+[tool.coverage.run]
+source = ["ownlock"]
+omit = ["ownlock/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_empty = true
 
 # Subprocess is required for `ownlock run` and MCP delegation; argv lists, no shell.
 [tool.bandit]

@@ -1,0 +1,29 @@
+{
+  "required_top_level_keys": [
+    "ownlock_version",
+    "python_version",
+    "python_executable",
+    "global_vault",
+    "project_vault",
+    "ownlock_passphrase_env_set",
+    "passphrase_source",
+    "mcp_importable",
+    "keyring_passphrase_stored",
+    "legacy_backups_in_cwd",
+    "stale_render_tmp_files",
+    "gitignore_covers_ownlock"
+  ],
+  "global_vault_keys_when_exists": [
+    "path",
+    "exists",
+    "schema_version",
+    "kdf_algo",
+    "kdf_iterations",
+    "kdf_stale",
+    "secret_count"
+  ],
+  "project_vault_keys_when_missing": [
+    "path",
+    "exists"
+  ]
+}

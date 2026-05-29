@@ -38,11 +38,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade "pip>=26"
-          pip install -e ".[mcp]"
+          pip install -e ".[mcp,dev]"
           pip install pytest
 
       - name: Run tests (fast — excludes smoke)
         run: pytest tests/ -v --tb=short -m "not smoke"
+
+      - name: Coverage (ubuntu 3.12 only)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          pytest tests/ -m "not smoke" --cov=ownlock --cov-report=term-missing --cov-report=html --cov-fail-under=84
+
+      - name: Upload coverage HTML
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
 
   # End-to-end subprocess smoke tests. Single OS/Python (ubuntu / 3.12) is
   # enough — smoke covers wiring, not platform behavior. Splitting it out

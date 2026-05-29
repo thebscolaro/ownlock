@@ -65,6 +65,47 @@ class TestBundleAPI:
         with pytest.raises(ValueError, match="Unsupported"):
             import_bundle(json.dumps(bundle), BUNDLE_PP)
 
+    def test_invalid_json_rejected(self):
+        with pytest.raises(ValueError, match="not valid JSON"):
+            import_bundle("not-json", BUNDLE_PP)
+
+    def test_non_object_json_rejected(self):
+        with pytest.raises(ValueError, match="JSON object"):
+            import_bundle("[1, 2]", BUNDLE_PP)
+
+    def test_missing_required_field_rejected(self):
+        import json
+
+        bundle = json.loads(export_bundle([], BUNDLE_PP))
+        del bundle["kdf_salt"]
+        with pytest.raises(ValueError, match="missing required"):
+            import_bundle(json.dumps(bundle), BUNDLE_PP)
+
+    def test_malformed_secret_entry_rejected(self):
+        import base64
+        import json
+        import os
+
+        from ownlock.crypto import KDF_ITERATIONS_CURRENT, NONCE_LEN, SALT_LEN, derive_key
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        salt = os.urandom(SALT_LEN)
+        nonce = os.urandom(NONCE_LEN)
+        key = derive_key(BUNDLE_PP, salt, KDF_ITERATIONS_CURRENT)
+        payload = json.dumps({"secrets": [{"name": "X"}]}).encode("utf-8")
+        ciphertext = AESGCM(key).encrypt(nonce, payload, None)
+        bundle = {
+            "ownlock_bundle_version": 1,
+            "kdf": "PBKDF2-HMAC-SHA256",
+            "kdf_iterations": KDF_ITERATIONS_CURRENT,
+            "kdf_salt": base64.b64encode(salt).decode("ascii"),
+            "nonce": base64.b64encode(nonce).decode("ascii"),
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        with pytest.raises(ValueError, match="malformed secret"):
+            import_bundle(json.dumps(bundle), BUNDLE_PP)
+
 
 class TestShareCLI:
     def test_share_then_import_round_trip(self, tmp_path, vault_a, vault_b, monkeypatch):
