@@ -172,11 +172,67 @@ app = typer.Typer(
 console = Console()
 
 
+def _offer_import_after_init(vault_path: Path, passphrase: str) -> None:
+    """Walk a fresh vault owner through populating it from an existing ``.env``.
+
+    Triggers only when:
+
+    * stdin/stdout are TTYs (so we never block a non-interactive caller),
+    * cwd contains at least one of :data:`DEFAULT_ENV_FILE_CANDIDATES`.
+
+    Dispatches to the same seed / bootstrap flows as ``ownlock import``,
+    which means a teammate cloning a repo whose ``.env`` already uses
+    ``vault(...)`` references gets prompted for the missing values, while
+    an author with a plaintext ``.env`` gets walked through seeding the
+    vault and (optionally) rewriting the file. Either path is the *whole*
+    onboarding flow — once it returns, ``init`` is done.
+    """
+    if not _is_tty():
+        return
+
+    discovered = [
+        Path.cwd() / name
+        for name in DEFAULT_ENV_FILE_CANDIDATES
+        if (Path.cwd() / name).exists()
+    ]
+    if not discovered:
+        return
+
+    names = ", ".join(p.name for p in discovered)
+    if not typer.confirm(
+        f"Found {names} in this directory. Import secrets into the vault now?",
+        default=True,
+    ):
+        console.print(
+            "[dim]Skipping import. Run "
+            "[bold]ownlock import[/bold] later when ready.[/dim]"
+        )
+        return
+
+    selected = [_validate_env_file(p) for p in discovered]
+    has_vault_refs = any(classify_env_file(f) == "bootstrap" for f in selected)
+    if has_vault_refs:
+        _import_bootstrap_flow(
+            selected, vault_path, passphrase, "default",
+            yes=False, values_from=None, is_tty=True,
+        )
+        return
+
+    rewrite = typer.confirm(
+        "After import, rewrite the file to use vault(\"KEY\") references?",
+        default=True,
+    )
+    _import_seed_flow(
+        selected, vault_path, passphrase, "default",
+        yes=False, rewrite=rewrite, is_tty=True,
+    )
+
+
 @app.command()
 def init(
     global_vault: bool = typer.Option(False, "--global", help="Create global vault at ~/.ownlock/ (passphrase in keyring)."),
 ) -> None:
-    """Create a new vault."""
+    """Create a new vault, then offer to import an existing .env if one is present."""
     project_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
 
     if global_vault:
@@ -209,6 +265,7 @@ def init(
             f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
             f"[dim](passphrase in keyring; global vault at {_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
         )
+        _offer_import_after_init(project_path, passphrase)
         return
 
     # Global exists: create only project vault using keyring passphrase
@@ -217,6 +274,7 @@ def init(
     _ensure_gitignore()
     audit.record("init", vault_path=project_path, extra={"scope": "project"})
     console.print(f"[green]Vault created at {_format_vault_path(project_path)}[/green]")
+    _offer_import_after_init(project_path, passphrase)
 
 
 def _read_value_from_editor(name: str) -> str:

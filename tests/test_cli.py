@@ -175,6 +175,69 @@ class TestInit:
         assert (tmp_path / ".ownlock" / "vault.db").exists()
         assert len(getpass_calls) == 0, "should not prompt when global vault exists (passphrase from env/keyring)"
 
+    def test_init_no_onboarding_when_not_tty(self, tmp_path, monkeypatch):
+        """Non-interactive init must NOT block waiting for an onboarding prompt."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("FOO=bar\n")
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(global_path, PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        # Default _is_tty returns False inside the test runner; just be explicit.
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: False)
+
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+        # .env was untouched and onboarding never ran.
+        assert "Found .env" not in result.output
+        assert (tmp_path / ".env").read_text() == "FOO=bar\n"
+
+    def test_init_offers_onboarding_when_tty_and_env_present(
+        self, tmp_path, monkeypatch
+    ):
+        """Interactive init with a .env in cwd offers to import + rewrite."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("FOO=bar-value\n")
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(global_path, PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: True)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: tmp_path / ".ownlock" / "vault.db",
+        )
+
+        # Three prompts: import? + rewrite-after? + which-keys? (default "all").
+        result = runner.invoke(app, ["init"], input="y\ny\nall\n")
+        assert result.exit_code == 0, result.output
+        assert "Found .env" in result.output
+        # Secret made it into the project vault.
+        with VaultManager(tmp_path / ".ownlock" / "vault.db", PASSPHRASE) as vm:
+            assert vm.get("FOO") == "bar-value"
+        # File was rewritten to use vault().
+        assert 'FOO=vault("FOO")' in (tmp_path / ".env").read_text()
+
+    def test_init_skips_onboarding_when_user_declines(self, tmp_path, monkeypatch):
+        """If the user answers N to the import prompt, .env is left alone."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".env").write_text("FOO=bar-value\n")
+        global_path = tmp_path / "global" / "vault.db"
+        global_path.parent.mkdir(parents=True, exist_ok=True)
+        VaultManager.init_vault(global_path, PASSPHRASE)
+        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", global_path)
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: True)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: tmp_path / ".ownlock" / "vault.db",
+        )
+
+        result = runner.invoke(app, ["init"], input="n\n")
+        assert result.exit_code == 0, result.output
+        assert "Skipping import" in result.output
+        # File untouched.
+        assert (tmp_path / ".env").read_text() == "FOO=bar-value\n"
+
 
 class TestSetGet:
     def test_set_rejects_invalid_secret_name(self, seeded_vault):
@@ -399,6 +462,135 @@ class TestImport:
         result = runner.invoke(app, ["get", "ALPHA"])
         assert result.exit_code == 0
         assert "one" in result.output
+
+    def test_import_routes_to_bootstrap_when_file_has_vault_refs(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """A file containing vault(...) refs triggers bootstrap-style prompting."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('NEEDED=vault("NEEDED")\n')
+        values_file = tmp_path / "v.json"
+        values_file.write_text(json.dumps({"NEEDED": "from-bootstrap"}))
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app, ["import", str(env_file), "--values-from", str(values_file)]
+        )
+        assert result.exit_code == 0
+        assert "Stored 1 secret" in result.output
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("NEEDED") == "from-bootstrap"
+
+    def test_import_with_rewrite_flag_seeds_then_rewrites(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """`import --rewrite` does today's auto job: import KEY=VALUE then rewrite to vault()."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text("API_KEY=secret-value\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: vault_db,
+        )
+
+        result = runner.invoke(app, ["import", str(env_file), "--rewrite", "--yes"])
+        assert result.exit_code == 0, result.output
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("API_KEY") == "secret-value"
+        assert 'API_KEY=vault("API_KEY")' in env_file.read_text()
+
+    def test_import_warns_when_rewrite_used_with_vault_ref_file(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """--rewrite is meaningless on a file that already uses vault(); we warn instead of silently ignoring."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("ALREADY", "x")
+        env_file = tmp_path / ".env"
+        env_file.write_text('ALREADY=vault("ALREADY")\n')
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["import", str(env_file), "--rewrite"])
+        assert result.exit_code == 0
+        assert "--rewrite has no effect" in result.output
+
+    def test_import_auto_discovers_default_files(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """No args + .env present in cwd → import that .env."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        (tmp_path / ".env").write_text("AUTO_FOUND=value\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["import"])
+        assert result.exit_code == 0
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("AUTO_FOUND") == "value"
+
+    def test_import_reports_when_no_files_exist(self, tmp_path, vault_db, monkeypatch):
+        """Auto-discovery with nothing on disk: friendly hint, exit 0."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["import"])
+        assert result.exit_code == 0
+        assert "No env files found" in result.output
+
+    def test_import_repeatable_file_flag(self, tmp_path, vault_db, monkeypatch):
+        """-f a -f b imports both files."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        a = tmp_path / "a.env"
+        a.write_text("KA=va\n")
+        b = tmp_path / "b.env"
+        b.write_text("KB=vb\n")
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(app, ["import", "-f", str(a), "-f", str(b)])
+        assert result.exit_code == 0
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("KA") == "va"
+            assert vm.get("KB") == "vb"
+
+
+class TestDeprecatedAliases:
+    """`auto` and `bootstrap` are kept as hidden aliases; they should still work."""
+
+    def test_auto_alias_runs_import_with_rewrite(self, tmp_path, vault_db, monkeypatch):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text("LEGACY=old-value\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: vault_db,
+        )
+
+        result = runner.invoke(app, ["auto", "-f", str(env_file), "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("LEGACY") == "old-value"
+        assert 'LEGACY=vault("LEGACY")' in env_file.read_text()
+
+    def test_bootstrap_alias_runs_import_in_bootstrap_mode(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('NEED=vault("NEED")\n')
+        values_file = tmp_path / "v.json"
+        values_file.write_text(json.dumps({"NEED": "answer"}))
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("NEED") == "answer"
 
     def test_import_skips_invalid_keys_and_comments(self, tmp_path, vault_db):
         """Import skips comments, blank lines, and invalid key names."""

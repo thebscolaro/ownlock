@@ -13,9 +13,9 @@ pip install ownlock
 ownlock init
 ```
 
-Have a plaintext `.env`? Run `ownlock auto` to import secrets and rewrite the file to use `vault()`.
+`ownlock init` creates the vault. If you already have a `.env` in the directory, it offers to import secrets from it (and to rewrite the file to use `vault(...)` references) on the spot — that's the entire onboarding.
 
-Otherwise: set a secret, add one line to `.env`, then run your app:
+If you'd rather drive it manually:
 
 ```bash
 ownlock set api-key
@@ -81,19 +81,26 @@ Use the full path to `ownlock-mcp` if it is not on your `PATH` (e.g. `~/.local/b
 
 ---
 
-## Guided setup (`ownlock auto`)
+## Get secrets into the vault
 
-`ownlock auto` discovers `.env` and common variants (`.env.local`, etc.), lets you choose which file and keys to import, then optionally rewrites the file so matching keys use `vault("...")`. After that you can use `ownlock run -- your-command` without editing `.env` by hand.
-
-```bash
-ownlock auto
-```
-
-For CI or non-interactive use:
+There's one command — `ownlock import` — that handles every shape of `.env` you might have:
 
 ```bash
-ownlock auto -f .env --yes
+ownlock import                       # auto-discover .env / .env.local / etc in cwd
+ownlock import path/to/.env          # explicit file
+ownlock import -f .env -f .env.local # multiple files
+ownlock import .env --rewrite        # plaintext: import, then rewrite file to vault(...)
+ownlock import .env --values-from values.json  # non-interactive bootstrap
 ```
+
+`import` looks at the file and routes itself:
+
+| File contents | What `import` does |
+|---|---|
+| Plain `KEY=VALUE` lines | Adds them to the vault. With `--rewrite`, also rewrites the file in place to `vault("KEY")` references (with a `0600` backup under `.ownlock/backups/`). |
+| Already has `vault(...)` references | Prompts only for the keys that aren't in your vault yet — the teammate-onboarding case. Pair with `--values-from JSON` for non-interactive runs. |
+
+`ownlock init` calls into this flow automatically when it sees a `.env` in the directory, so a teammate cloning the project and running `ownlock init` gets walked all the way to a working vault.
 
 ---
 
@@ -141,10 +148,12 @@ Two flows depending on whether the new dev needs to *receive* secrets or just fi
 **Fill in placeholders** — your `.env` is committed with `vault("...")` lines and the new dev runs:
 
 ```bash
-ownlock bootstrap
+ownlock init        # init detects the existing .env and walks them through
+# or, after the vault already exists:
+ownlock import      # auto-detects vault() refs and prompts only for missing keys
 ```
 
-This scans `.env` (and common variants) for `vault()` references, checks the local vault, and prompts only for the keys that are missing. Idempotent: re-running after a teammate adds a new vault reference asks for that one key.
+Idempotent: re-running after another teammate adds a new vault reference asks for that one key only.
 
 **Hand off real values** — pack a subset of your vault into an encrypted bundle, share it (Slack, email, anywhere), and let the recipient import it:
 
@@ -188,7 +197,7 @@ ownlock rekey                    # interactive: asks which (or both)
 | `--global` | **Global vault** |
 | `--project` | **Project vault** at current directory |
 
-Commands that accept `--global` / `--project`: `set`, `get`, `list`, `delete`, `import`, `scan`, and `export --example` (template lines from vault key names only). `run` and plain `export` resolve vault references from your `.env` file.
+Commands that accept `--global` / `--project`: `set`, `get`, `list`, `delete`, `import`, `scan`, `rekey`, `share`, `import-share`, and `export --example` (template lines from vault key names only). `run` and plain `export` resolve vault references from your `.env` file.
 
 ---
 
@@ -218,13 +227,14 @@ ownlock export --format docker
 
 ---
 
-## Import, rewrite-env, scan
+## rewrite-env and scan
 
 ```bash
-ownlock import secrets.env
-ownlock rewrite-env -f .env
-ownlock scan .
+ownlock rewrite-env -f .env   # rewrite an env file to use vault(...) without re-importing
+ownlock scan .                # search a directory for plaintext leaks of vault values
 ```
+
+`rewrite-env` is useful when you've already populated the vault (e.g. via `ownlock set`) and just want to swap an existing `.env` over to references. For a fresh project, `ownlock import .env --rewrite` does both steps in one go.
 
 ---
 
@@ -329,7 +339,7 @@ Example: `web.config` stays untouched and relies on standard transforms for `Log
 
 | Command | Description |
 |---------|-------------|
-| `ownlock init` | Create project vault (first run also creates global + keyring) |
+| `ownlock init` | Create project vault (first run also creates global + keyring). Offers to import an existing `.env` if found |
 | `ownlock init --global` | Create global vault only |
 | `ownlock set KEY` / `KEY=VALUE` | Store secret. `--from-file PATH`, `--editor` for multi-line values |
 | `ownlock get KEY` | Print decrypted value |
@@ -339,18 +349,18 @@ Example: `web.config` stays untouched and relies on standard transforms for `Log
 | `ownlock rekey` | Re-encrypt at current KDF (`--upgrade-kdf`) and/or rotate passphrase (`--rotate-passphrase`) |
 | `ownlock run -- CMD` | Resolve `.env`, inject secrets, redact stdout |
 | `ownlock export` | Print resolved KEY=VALUE pairs (`--example` emits `KEY=vault("KEY")` lines from vault names only) |
-| `ownlock import FILE` | Bulk import from plaintext .env |
-| `ownlock bootstrap` | Prompt teammates only for vault keys missing from their local vault |
+| `ownlock import [FILE]` | Get secrets into the vault. Auto-detects plaintext vs. `vault(...)` references. `--rewrite` to also convert the file. `--values-from JSON` for non-interactive bootstrap |
 | `ownlock share KEYS -o FILE` | Export an encrypted bundle for a teammate (separate bundle passphrase) |
 | `ownlock import-share FILE` | Import an encrypted bundle into the local vault |
-| `ownlock rewrite-env` | Rewrite env file to use `vault()` |
-| `ownlock auto` | Guided import + rewrite |
+| `ownlock rewrite-env` | Rewrite an existing env file to use `vault(...)` (without re-importing) |
 | `ownlock scan DIR` | Scan for leaked secret values (`--max-file-bytes` skips huge files before reading) |
 | `ownlock render [TEMPLATE]` | Render `*.template.*` files, substituting `{{vault(...)}}` with decrypted values |
 | `ownlock install-hook` | Install a pre-commit hook that runs `ownlock scan` |
 | `ownlock completion {bash,zsh,fish,pwsh}` | Print a shell completion script |
 
-Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan`, `rekey`, `bootstrap`, `share`, `import-share`, and `export --example` to override vault selection.
+Add `--global` or `--project` to `set`, `get`, `list`, `delete`, `import`, `scan`, `rekey`, `share`, `import-share`, and `export --example` to override vault selection.
+
+> `ownlock auto` and `ownlock bootstrap` from 0.1 still work as hidden aliases for `ownlock import --rewrite` and `ownlock import` respectively. They will be removed in a future release.
 
 ---
 
