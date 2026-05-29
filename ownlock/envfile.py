@@ -1,16 +1,19 @@
-"""Parse / import / rewrite ``.env`` files.
+"""Parse / classify / import / rewrite ``.env`` files.
 
-Three entry points used by ``ownlock import``, ``ownlock auto``, and
-``ownlock rewrite-env``:
+Entry points used by ``ownlock import`` and ``ownlock rewrite-env``:
 
 * :func:`iter_env_kv_pairs` — generator of ``(key, value)`` tuples from a
   ``.env`` file. Skips comments, blank lines, lines without ``=``, and keys
   that fail :func:`ownlock.paths.is_valid_secret_name`.
-* :func:`import_env_file_into_vault` — pump those pairs straight into a
-  :class:`VaultManager`. Used by ``import`` and ``auto``'s import phase.
+* :func:`classify_env_file` — decide whether a file should be treated as
+  ``"bootstrap"`` (already contains ``vault(...)`` references; we should
+  prompt for missing keys) or ``"seed"`` (plain ``KEY=VALUE``; we should
+  add the values to the vault). Drives ``ownlock import``'s auto-routing.
+* :func:`import_env_file_into_vault` — pump KV pairs straight into a
+  :class:`VaultManager`. Used by ``import``'s seed flow.
 * :func:`rewrite_env_lines_to_vault_syntax` — rewrite known keys to
-  ``vault("KEY"[, env="..."])``. Used by both ``auto`` and ``rewrite-env``
-  so they produce identical output for the same input.
+  ``vault("KEY"[, env="..."])``. Used by both ``import --rewrite`` and
+  ``rewrite-env`` so they produce identical output for the same input.
 * :func:`format_vault_expr` — single source of truth for how a
   ``vault(...)`` reference is spelled in generated env / template content,
   shared with ``ownlock export --example``.
@@ -18,11 +21,45 @@ Three entry points used by ``ownlock import``, ``ownlock auto``, and
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterator
 
 from ownlock.paths import is_valid_secret_name
 from ownlock.vault import VaultManager
+
+# Loose pattern: any literal ``vault(`` is enough to flag a file as "bootstrap"
+# shape. The full parse is left to :mod:`ownlock.resolver` once we commit to
+# that path; classification only needs to decide which workflow to run.
+_VAULT_CALL_HINT = re.compile(r"\bvault\s*\(")
+
+
+def classify_env_file(env_file: Path) -> str:
+    """Return ``"bootstrap"``, ``"seed"``, or ``"empty"``.
+
+    Drives ``ownlock import``'s automatic routing:
+
+    * ``"bootstrap"`` — file has at least one ``vault(...)`` reference.
+      The file is what a teammate sees after cloning a repo that's already
+      on ownlock; we should compute which references aren't in their vault
+      yet and prompt only for those.
+    * ``"seed"`` — file has plain ``KEY=VALUE`` pairs but no ``vault(...)``
+      calls. The author wants to seed their fresh vault from this file.
+    * ``"empty"`` — neither shape applies; nothing useful to do.
+
+    Mixed files (both vault refs *and* loose ``KEY=VALUE`` lines) classify
+    as ``"bootstrap"``: the vault references are the source of truth, and
+    any plain values are likely leftover or unrelated config that should be
+    edited by hand rather than swept into the vault wholesale.
+    """
+    if not env_file.exists():
+        return "empty"
+    text = env_file.read_text(encoding="utf-8", errors="ignore")
+    if _VAULT_CALL_HINT.search(text):
+        return "bootstrap"
+    for _ in iter_env_kv_pairs(env_file):
+        return "seed"
+    return "empty"
 
 
 def iter_env_kv_pairs(env_file: Path) -> Iterator[tuple[str, str]]:

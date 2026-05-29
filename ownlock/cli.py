@@ -27,6 +27,7 @@ from ownlock.backups import (
 from ownlock.doctor import gather_doctor_state as _gather_doctor_state
 from ownlock.envfile import (
     DEFAULT_ENV_FILE_CANDIDATES,
+    classify_env_file,
     format_vault_expr,
     import_env_file_into_vault as _import_env_file_into_vault,
     iter_env_kv_pairs,
@@ -922,89 +923,373 @@ def export_env(
             typer.echo(f"{key}={value}")
 
 
-@app.command("import")
-@_safe_command
-def import_env(
-    env_file: Path = typer.Argument(..., help="Path to plaintext .env to import."),
-    env: str = typer.Option("default", "--env", "-e"),
-    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
-    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Import without interactive key selection."),
-) -> None:
-    """Bulk import secrets from a plaintext .env file."""
-    env_file = _validate_env_file(env_file)
-    if not env_file.exists():
-        console.print("[red]File not found.[/red]")
+def _pick_indexes_interactively(
+    items: list[Any],
+    prompt_text: str,
+    *,
+    label: Callable[[Any], str],
+    cancel_message: str = "Cancelled.",
+) -> list[Any]:
+    """Show *items* numbered, prompt for a comma-separated index list, return picks.
+
+    Accepts ``"all"`` or blank (defaults to ``"all"``). Empty input after
+    explicit clearing is treated as cancel and exits the command. De-dupes
+    selections while preserving order. Used by the unified ``import``
+    command for the file picker and the per-key picker.
+    """
+    if not items:
+        return []
+    for idx, item in enumerate(items, start=1):
+        console.print(f"  {idx}. {label(item)}")
+    choice = typer.prompt(prompt_text, default="all").strip()
+    if not choice:
+        console.print(f"[dim]{cancel_message}[/dim]")
         raise typer.Exit(1)
+    if choice.lower() == "all":
+        return list(items)
+    seen: set[int] = set()
+    picked: list[Any] = []
+    for part in choice.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            idx = int(part)
+        except ValueError:
+            console.print(f"[red]Invalid selection '{part}'.[/red]")
+            raise typer.Exit(1)
+        if idx < 1 or idx > len(items):
+            console.print(f"[red]Selection {idx} is out of range.[/red]")
+            raise typer.Exit(1)
+        if idx not in seen:
+            seen.add(idx)
+            picked.append(items[idx - 1])
+    return picked
 
-    passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    # Interactive key picker in TTY mode (unless --yes)
-    if _is_tty() and not yes:
-        candidates: list[tuple[str, str]] = list(iter_env_kv_pairs(env_file))
+def _collect_env_files(
+    positional: Optional[Path],
+    files: Optional[list[Path]],
+) -> list[Path]:
+    """Build the file list for ``ownlock import``.
 
+    Resolution order:
+
+    1. Positional argument, if given (single file).
+    2. ``-f / --file`` (repeatable), if given.
+    3. Auto-discover from :data:`DEFAULT_ENV_FILE_CANDIDATES` in cwd.
+
+    Each path is validated and existence-checked; missing positional input
+    is a hard error (the user typed an explicit path), but missing files in
+    auto-discovery just get filtered out.
+    """
+    if positional is not None:
+        validated = _validate_env_file(positional)
+        if not validated.exists():
+            console.print(f"[red]File not found: {positional}[/red]")
+            raise typer.Exit(1)
+        return [validated]
+
+    if files:
+        out: list[Path] = []
+        for f in files:
+            v = _validate_env_file(Path(f))
+            if not v.exists():
+                console.print(f"[red]File not found: {f}[/red]")
+                raise typer.Exit(1)
+            out.append(v)
+        return out
+
+    discovered: list[Path] = []
+    for name in DEFAULT_ENV_FILE_CANDIDATES:
+        path = Path(name)
+        if (Path.cwd() / name).exists():
+            discovered.append(_validate_env_file(path))
+    return discovered
+
+
+def _import_seed_flow(
+    files: list[Path],
+    vault_path: Path,
+    passphrase: str,
+    env: str,
+    *,
+    yes: bool,
+    rewrite: bool,
+    is_tty: bool,
+) -> None:
+    """Plaintext ``KEY=VALUE`` → vault.
+
+    Single-file interactive runs get a per-key picker. Multi-file or
+    non-interactive runs import every valid key. With *rewrite*, the
+    primary file (preferring ``.env``) is rewritten to use ``vault(...)``
+    references afterwards — that's the old ``auto`` workflow.
+    """
+    selected_keys_per_file: dict[Path, set[str]] = {}
+
+    if is_tty and not yes and len(files) == 1:
+        f = files[0]
+        candidates = list(iter_env_kv_pairs(f))
         if not candidates:
             console.print("[dim]No valid KEY=VALUE entries found to import.[/dim]")
             return
-
-        console.print(f"Found {len(candidates)} key(s) in {env_file}:")
-        for idx, (key, _val) in enumerate(candidates, start=1):
-            console.print(f"  {idx}. {key}")
-
-        choice = typer.prompt(
+        console.print(f"Found {len(candidates)} key(s) in {f}:")
+        picked = _pick_indexes_interactively(
+            candidates,
             "Enter indexes to import (comma-separated, 'all' for all, blank = cancel)",
-            default="all",
-        ).strip()
-        if not choice:
-            console.print("[dim]Import cancelled.[/dim]")
-            raise typer.Exit(1)
+            label=lambda kv: kv[0],
+            cancel_message="Import cancelled.",
+        )
+        selected_keys_per_file[f] = {k for k, _ in picked}
 
-        selected_indexes: list[int] = []
-        if choice.lower() == "all":
-            selected_indexes = list(range(1, len(candidates) + 1))
-        else:
-            for part in choice.split(","):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    idx = int(part)
-                except ValueError:
-                    console.print(f"[red]Invalid selection '{part}'.[/red]")
-                    raise typer.Exit(1)
-                if idx < 1 or idx > len(candidates):
-                    console.print(f"[red]Selection {idx} is out of range.[/red]")
-                    raise typer.Exit(1)
-                selected_indexes.append(idx)
-
-        # Deduplicate while preserving order, map back to keys
-        seen: set[int] = set()
-        selected_keys: list[str] = []
-        for idx in selected_indexes:
-            if idx not in seen:
-                seen.add(idx)
-                key, _ = candidates[idx - 1]
-                selected_keys.append(key)
-
-        with VaultManager(vault_path, passphrase) as vm:
-            count = 0
-            for key, value in candidates:
-                if key in selected_keys:
-                    vm.set(key, value, env)
-                    count += 1
-    else:
-        # Non-interactive or --yes: import all valid keys
-        with VaultManager(vault_path, passphrase) as vm:
-            count = _import_env_file_into_vault(env_file, env, vm)
+    count = 0
+    with VaultManager(vault_path, passphrase) as vm:
+        for f in files:
+            if f in selected_keys_per_file:
+                allowed = selected_keys_per_file[f]
+                for key, value in iter_env_kv_pairs(f):
+                    if key in allowed:
+                        vm.set(key, value, env)
+                        count += 1
+            else:
+                count += _import_env_file_into_vault(f, env, vm)
 
     audit.record(
         "import",
         vault_path=vault_path,
         env=env,
-        extra={"source": str(env_file), "secrets_imported": count},
+        extra={
+            "sources": [str(f) for f in files],
+            "secrets_imported": count,
+            "mode": "seed",
+        },
     )
-    console.print(f"[green]Imported {count} secrets into vault (env={env}).[/green]")
+    console.print(f"[green]Imported {count} secret(s) into vault (env={env}).[/green]")
+
+    if not rewrite or count == 0:
+        return
+
+    # Pick the rewrite target: prefer literal ".env" if present, else first file.
+    rewrite_target = next((f for f in files if f.name == ".env"), files[0])
+    original_text = rewrite_target.read_text()
+    lines = original_text.splitlines()
+    with VaultManager(vault_path, passphrase) as vm:
+        existing = vm.get_all_decrypted(env)
+    new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
+
+    if changed == 0:
+        console.print(
+            f"[dim]No rewrite needed for {rewrite_target}; already on vault().[/dim]"
+        )
+        return
+
+    backup_path = _write_env_backup(rewrite_target, original_text)
+    rewrite_target.write_text("\n".join(new_lines) + "\n")
+    console.print(
+        f"[green]Rewrote {changed} key(s) in {rewrite_target}. "
+        f"Backup saved to {backup_path}.[/green]"
+    )
+
+
+def _import_bootstrap_flow(
+    files: list[Path],
+    vault_path: Path,
+    passphrase: str,
+    default_env: str,
+    *,
+    yes: bool,
+    values_from: Optional[Path],
+    is_tty: bool,
+) -> None:
+    """``vault(...)`` refs → prompt only for keys missing from the vault.
+
+    Used when an env file has already been rewritten to vault references
+    (the teammate-clone workflow). Idempotent: if every reference resolves,
+    the function reports that and exits clean.
+    """
+    from ownlock.resolver import collect_vault_refs
+
+    seen: set[tuple[str, str]] = set()
+    refs: list[tuple[str, str]] = []
+    for path in files:
+        for ref in collect_vault_refs(path):
+            key = ref["key"]
+            ref_env = ref["env_arg"] or default_env
+            if (key, ref_env) in seen:
+                continue
+            seen.add((key, ref_env))
+            refs.append((key, ref_env))
+
+    if not refs:
+        console.print("[dim]No vault() references found.[/dim]")
+        return
+
+    missing: list[tuple[str, str]] = []
+    with VaultManager(vault_path, passphrase) as vm:
+        for key, ref_env in refs:
+            if vm.get(key, ref_env) is None:
+                missing.append((key, ref_env))
+
+    if not missing:
+        console.print(
+            f"[green]All {len(refs)} vault() reference(s) already populated. "
+            "Nothing to do.[/green]"
+        )
+        return
+
+    console.print(
+        f"[bold]Missing {len(missing)} secret(s)[/bold] "
+        f"(of {len(refs)} reference(s) found):"
+    )
+    for key, ref_env in missing:
+        suffix = f" (env={ref_env})" if ref_env != "default" else ""
+        console.print(f"  - {key}{suffix}")
+
+    supplied: dict[tuple[str, str], str] = {}
+    if values_from is not None:
+        try:
+            payload = json.loads(values_from.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            console.print(f"[red]Could not read --values-from: {e}[/red]")
+            raise typer.Exit(1)
+        if not isinstance(payload, dict):
+            console.print("[red]--values-from must contain a JSON object.[/red]")
+            raise typer.Exit(1)
+        for key, ref_env in missing:
+            if key in payload:
+                supplied[(key, ref_env)] = str(payload[key])
+
+    if not supplied:
+        if not is_tty:
+            console.print(
+                "[red]Non-interactive run with no --values-from. "
+                "Pass values via --values-from or run interactively.[/red]"
+            )
+            raise typer.Exit(1)
+        for key, ref_env in missing:
+            value = getpass.getpass(f"Enter value for {key} (env={ref_env}): ")
+            if value:
+                supplied[(key, ref_env)] = value
+
+    if not supplied:
+        console.print("[dim]No values provided. Nothing to write.[/dim]")
+        return
+
+    if is_tty and not yes and not values_from:
+        if not typer.confirm(
+            f"Save {len(supplied)} new secret(s) to {_format_vault_path(vault_path)}?",
+            default=True,
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    with VaultManager(vault_path, passphrase) as vm:
+        for (key, ref_env), value in supplied.items():
+            vm.set(key, value, ref_env)
+
+    audit.record(
+        "import",
+        vault_path=vault_path,
+        extra={
+            "sources": [str(f) for f in files],
+            "secrets_set": len(supplied),
+            "names": sorted({k for (k, _) in supplied}),
+            "mode": "bootstrap",
+        },
+    )
+    console.print(f"[green]Stored {len(supplied)} secret(s).[/green]")
+    skipped = len(missing) - len(supplied)
+    if skipped:
+        console.print(f"[dim]Skipped {skipped} (no value provided).[/dim]")
+
+
+@app.command("import")
+@_safe_command
+def import_env(
+    env_file: Optional[Path] = typer.Argument(
+        None,
+        help="Env file to import. Omit to use -f or auto-discover .env / .env.local / etc.",
+    ),
+    files: Optional[list[Path]] = typer.Option(
+        None,
+        "-f",
+        "--file",
+        help="Env file(s). Repeatable. Use instead of the positional argument when "
+        "you have multiple files.",
+    ),
+    env: str = typer.Option("default", "--env", "-e", help="Vault environment to write to."),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip interactive prompts."),
+    rewrite: bool = typer.Option(
+        False,
+        "--rewrite",
+        help="After a plaintext seed import, rewrite the env file in place to "
+        "use vault(\"KEY\") references (with a 0600 backup under .ownlock/backups/).",
+    ),
+    values_from: Optional[Path] = typer.Option(
+        None,
+        "--values-from",
+        help="JSON object {KEY: VALUE} for non-interactive bootstrap "
+        "(when the env file already has vault(\"...\") references).",
+    ),
+) -> None:
+    """Get secrets into the vault from a .env file.
+
+    Auto-routes based on what the file looks like:
+
+    * Plain ``KEY=VALUE`` lines  → seed flow (adds them to the vault).
+      Pass ``--rewrite`` to also rewrite the file to use ``vault(...)``
+      references afterwards.
+    * Already contains ``vault(...)`` refs → bootstrap flow (prompts only
+      for the keys missing from your vault). Use ``--values-from JSON``
+      for non-interactive runs.
+
+    Run with no arguments to auto-discover ``.env`` / ``.env.local`` /
+    ``.env.development`` / ``.env.production`` in the current directory.
+    """
+    selected_files = _collect_env_files(env_file, files)
+    if not selected_files:
+        console.print(
+            "[dim]No env files found. Pass a path, use -f, or create one of "
+            f"{', '.join(DEFAULT_ENV_FILE_CANDIDATES)}.[/dim]"
+        )
+        return
+
+    has_vault_refs = any(classify_env_file(f) == "bootstrap" for f in selected_files)
+    is_tty = _is_tty()
+
+    if has_vault_refs and rewrite:
+        # Rewriting a file that already uses vault() is a no-op at best and
+        # confusing at worst — flag it loudly rather than silently ignore.
+        console.print(
+            "[yellow]--rewrite has no effect when the file already uses "
+            "vault() references; ignoring.[/yellow]"
+        )
+
+    passphrase = resolve_passphrase()
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+
+    if has_vault_refs:
+        _import_bootstrap_flow(
+            selected_files,
+            vault_path,
+            passphrase,
+            env,
+            yes=yes,
+            values_from=values_from,
+            is_tty=is_tty,
+        )
+    else:
+        _import_seed_flow(
+            selected_files,
+            vault_path,
+            passphrase,
+            env,
+            yes=yes,
+            rewrite=rewrite,
+            is_tty=is_tty,
+        )
 
 
 _COMPLETION_SHELLS = {"bash", "zsh", "fish", "pwsh", "powershell"}
@@ -1362,306 +1647,64 @@ def import_share(
     )
 
 
-@app.command("bootstrap")
+# Deprecated aliases. ``bootstrap`` and ``auto`` were separate commands in
+# 0.1; v0.2 collapses both into ``import``'s auto-routing. We keep the
+# top-level commands working (and registered with Typer so existing scripts
+# / docs / shell completions don't break) but drop them from --help by
+# leaving the docstring marked DEPRECATED — Typer still renders them, so
+# we additionally print a one-line nudge to stderr the first time.
+
+
+@app.command("bootstrap", hidden=True)
 @_safe_command
 def bootstrap(
-    env_files: Optional[list[Path]] = typer.Option(
-        None,
-        "-f",
-        "--file",
-        help="Env file(s) to scan for vault() references. Defaults to common .env* files.",
-    ),
-    env: str = typer.Option("default", "--env", "-e", help="Vault environment for missing keys."),
-    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
-    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip final confirmation prompt."),
-    values_from: Optional[Path] = typer.Option(
-        None,
-        "--values-from",
-        help="JSON file mapping {key: value} for missing secrets (non-interactive).",
-    ),
+    env_files: Optional[list[Path]] = typer.Option(None, "-f", "--file"),
+    env: str = typer.Option("default", "--env", "-e"),
+    global_vault: bool = typer.Option(False, "--global"),
+    project: bool = typer.Option(False, "--project"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    values_from: Optional[Path] = typer.Option(None, "--values-from"),
 ) -> None:
-    """Onboard a teammate: prompt only for vault() keys missing from the vault.
-
-    Reads ``.env`` (and common variants) for ``vault("name")`` references,
-    compares against what's already in the vault, and asks for the rest. A
-    new dev can run this once after cloning to fill in the secrets the
-    project expects, without learning what every key is from a teammate over
-    Slack.
-    """
-    from ownlock.resolver import collect_vault_refs
-
-    if env_files:
-        candidates = [_validate_env_file(Path(f)) for f in env_files]
-    else:
-        candidates = [
-            _validate_env_file(Path(name))
-            for name in DEFAULT_ENV_FILE_CANDIDATES
-            if (Path.cwd() / name).exists()
-        ]
-
-    candidates = [c for c in candidates if c.exists()]
-    if not candidates:
-        console.print(
-            "[dim]No env files found. Use --file to specify one, or create a .env "
-            'file with vault("...") references.[/dim]'
-        )
-        return
-
-    # Collect every vault() reference; deduplicate by (key, env, vault selection).
-    seen: set[tuple[str, str]] = set()
-    refs: list[tuple[str, str, Optional[bool], Optional[bool]]] = []
-    for path in candidates:
-        for ref in collect_vault_refs(path):
-            key = ref["key"]
-            ref_env = ref["env_arg"] or env
-            if (key, ref_env) in seen:
-                continue
-            seen.add((key, ref_env))
-            project_flag = ref.get("project")
-            global_flag = ref.get("use_global")
-            project_bool = (project_flag == "true") if project_flag else None
-            global_bool = (global_flag == "true") if global_flag else None
-            refs.append((key, ref_env, project_bool, global_bool))
-
-    if not refs:
-        console.print("[dim]No vault() references found in scanned env files.[/dim]")
-        return
-
-    passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
-
-    missing: list[tuple[str, str]] = []
-    with VaultManager(vault_path, passphrase) as vm:
-        for key, ref_env, _proj, _glob in refs:
-            if vm.get(key, ref_env) is None:
-                missing.append((key, ref_env))
-
-    if not missing:
-        console.print(
-            f"[green]All {len(refs)} vault() reference(s) already populated. "
-            "Nothing to do.[/green]"
-        )
-        return
-
+    """[deprecated] Use ``ownlock import`` — it auto-detects vault() references."""
     console.print(
-        f"[bold]Missing {len(missing)} secret(s)[/bold] "
-        f"(of {len(refs)} reference(s) found):"
+        "[yellow]'ownlock bootstrap' is deprecated; use "
+        "[bold]ownlock import[/bold] (auto-detects vault() references).[/yellow]"
     )
-    for key, ref_env in missing:
-        suffix = f" (env={ref_env})" if ref_env != "default" else ""
-        console.print(f"  - {key}{suffix}")
-
-    # Source values: --values-from JSON or interactive prompts.
-    supplied: dict[tuple[str, str], str] = {}
-    if values_from is not None:
-        try:
-            payload = json.loads(values_from.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            console.print(f"[red]Could not read --values-from: {e}[/red]")
-            raise typer.Exit(1)
-        if not isinstance(payload, dict):
-            console.print("[red]--values-from must contain a JSON object.[/red]")
-            raise typer.Exit(1)
-        for key, ref_env in missing:
-            if key in payload:
-                supplied[(key, ref_env)] = str(payload[key])
-
-    if not supplied:
-        if not _is_tty():
-            console.print(
-                "[red]Non-interactive run with no --values-from. "
-                "Pass values via --values-from or run interactively.[/red]"
-            )
-            raise typer.Exit(1)
-        for key, ref_env in missing:
-            value = getpass.getpass(f"Enter value for {key} (env={ref_env}): ")
-            if value:
-                supplied[(key, ref_env)] = value
-
-    if not supplied:
-        console.print("[dim]No values provided. Nothing to write.[/dim]")
-        return
-
-    if _is_tty() and not yes and not values_from:
-        if not typer.confirm(
-            f"Save {len(supplied)} new secret(s) to {_format_vault_path(vault_path)}?",
-            default=True,
-        ):
-            console.print("[dim]Cancelled.[/dim]")
-            raise typer.Exit(1)
-
-    with VaultManager(vault_path, passphrase) as vm:
-        for (key, ref_env), value in supplied.items():
-            vm.set(key, value, ref_env)
-
-    audit.record(
-        "bootstrap",
-        vault_path=vault_path,
-        extra={
-            "secrets_set": len(supplied),
-            "names": sorted({k for (k, _) in supplied}),
-        },
+    return import_env(
+        env_file=None,
+        files=env_files,
+        env=env,
+        global_vault=global_vault,
+        project=project,
+        yes=yes,
+        rewrite=False,
+        values_from=values_from,
     )
-    console.print(f"[green]Stored {len(supplied)} secret(s).[/green]")
-    skipped = len(missing) - len(supplied)
-    if skipped:
-        console.print(f"[dim]Skipped {skipped} (no value provided).[/dim]")
 
 
-@app.command("auto")
+@app.command("auto", hidden=True)
 @_safe_command
 def auto(
-    files: Optional[list[Path]] = typer.Option(
-        None,
-        "-f",
-        "--file",
-        help="Env file(s) to import from.",
-    ),
-    env: str = typer.Option("default", "--env", "-e", help="Vault environment for import and rewrite."),
-    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
-    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Run without interactive prompts."),
+    files: Optional[list[Path]] = typer.Option(None, "-f", "--file"),
+    env: str = typer.Option("default", "--env", "-e"),
+    global_vault: bool = typer.Option(False, "--global"),
+    project: bool = typer.Option(False, "--project"),
+    yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Guided flow: import secrets from env files and rewrite env to use vault()."""
-    is_tty = _is_tty()
-
-    # Determine candidate files
-    if files:
-        candidate_files = [Path(f) for f in files]
-    else:
-        # Common env file names in current directory
-        candidate_files = [Path(name) for name in DEFAULT_ENV_FILE_CANDIDATES]
-
-    valid_files: list[Path] = []
-    for f in candidate_files:
-        f = _validate_env_file(f)
-        if f.exists():
-            valid_files.append(f)
-
-    if not valid_files:
-        console.print("[dim]No env files found. Use --file to specify one or more files.[/dim]")
-        return
-
-    selected_files: list[Path]
-    if files:
-        # Explicit file list: no further selection
-        selected_files = valid_files
-    elif is_tty and not yes:
-        console.print("Found env files:")
-        for idx, f in enumerate(valid_files, start=1):
-            console.print(f"  {idx}. {f}")
-        choice = typer.prompt(
-            "Select file(s) to import from (comma-separated indexes, or blank to cancel)",
-            default="",
-        ).strip()
-        if not choice:
-            console.print("[dim]Import cancelled.[/dim]")
-            raise typer.Exit(1)
-        indexes: list[int] = []
-        for part in choice.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                idx = int(part)
-            except ValueError:
-                console.print(f"[red]Invalid selection '{part}'.[/red]")
-                raise typer.Exit(1)
-            if idx < 1 or idx > len(valid_files):
-                console.print(f"[red]Selection {idx} is out of range.[/red]")
-                raise typer.Exit(1)
-            indexes.append(idx)
-        # Deduplicate while preserving order
-        seen: set[int] = set()
-        selected_files = []
-        for idx in indexes:
-            if idx not in seen:
-                seen.add(idx)
-                selected_files.append(valid_files[idx - 1])
-    else:
-        # Non-interactive or --yes with no explicit files: use all discovered files
-        selected_files = valid_files
-
-    # Preview import counts (TTY, no --yes)
-    total_keys = 0
-    if is_tty and not yes:
-        for f in selected_files:
-            count = 0
-            for line in f.read_text().splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or "=" not in stripped:
-                    continue
-                key, _, value = stripped.partition("=")
-                key = key.strip()
-                value = value.strip()
-                if key and value and _is_valid_secret_name(key):
-                    count += 1
-            total_keys += count
-        console.print(
-            f"About to import approximately {total_keys} key(s) "
-            f"from {len(selected_files)} file(s) into the {'global' if global_vault else 'project'} vault."
-        )
-        if not typer.confirm("Continue?", default=False):
-            console.print("[dim]Import cancelled.[/dim]")
-            raise typer.Exit(1)
-
-    passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
-
-    with VaultManager(vault_path, passphrase) as vm:
-        imported_total = 0
-        for f in selected_files:
-            imported_total += _import_env_file_into_vault(f, env, vm)
-
+    """[deprecated] Use ``ownlock import --rewrite``."""
     console.print(
-        f"[green]Imported {imported_total} secrets into "
-        f"{'global' if global_vault else 'project'} vault (env={env}).[/green]"
+        "[yellow]'ownlock auto' is deprecated; use "
+        "[bold]ownlock import --rewrite[/bold].[/yellow]"
     )
-
-    # Decide which env file to rewrite: prefer .env if present, otherwise the first selected file
-    rewrite_target = None
-    for f in selected_files:
-        if f.name == ".env":
-            rewrite_target = f
-            break
-    if rewrite_target is None:
-        rewrite_target = selected_files[0]
-
-    if is_tty and not yes:
-        if not typer.confirm(f"Rewrite {rewrite_target} to use vault() references now?", default=False):
-            console.print(
-                "[dim]Rewrite step skipped. You can run "
-                f"'ownlock rewrite-env -f {rewrite_target}' later.[/dim]"
-            )
-            return
-    elif not yes:
-        # Non-interactive without --yes: skip rewrite
-        console.print(
-            "[dim]Non-interactive session; skipping rewrite. "
-            f"Run 'ownlock rewrite-env -f {rewrite_target}' manually.[/dim]"
-        )
-        return
-
-    # Perform rewrite (shared logic with rewrite-env)
-    original_text = rewrite_target.read_text()
-    lines = original_text.splitlines()
-
-    with VaultManager(vault_path, passphrase) as vm:
-        existing = vm.get_all_decrypted(env)
-
-    new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
-
-    if changed == 0:
-        console.print(
-            f"[dim]No changes needed; {rewrite_target} already uses vault() or keys not in vault.[/dim]"
-        )
-        return
-
-    backup_path = _write_env_backup(rewrite_target, original_text)
-    rewrite_target.write_text("\n".join(new_lines) + "\n")
-    console.print(
-        f"[green]Rewrote {changed} key(s) in {rewrite_target}. Backup saved to {backup_path}.[/green]"
+    return import_env(
+        env_file=None,
+        files=files,
+        env=env,
+        global_vault=global_vault,
+        project=project,
+        yes=yes,
+        rewrite=True,
+        values_from=None,
     )
 
 

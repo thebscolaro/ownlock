@@ -6,10 +6,48 @@ from pathlib import Path
 
 from ownlock.envfile import (
     DEFAULT_ENV_FILE_CANDIDATES,
+    classify_env_file,
     format_vault_expr,
     iter_env_kv_pairs,
     rewrite_env_lines_to_vault_syntax,
 )
+
+
+class TestClassifyEnvFile:
+    def test_missing_file_is_empty(self, tmp_path: Path) -> None:
+        assert classify_env_file(tmp_path / "nope.env") == "empty"
+
+    def test_blank_or_comment_only_file_is_empty(self, tmp_path: Path) -> None:
+        p = tmp_path / ".env"
+        p.write_text("# header\n\n# nothing here\n")
+        assert classify_env_file(p) == "empty"
+
+    def test_plain_kv_classifies_as_seed(self, tmp_path: Path) -> None:
+        p = tmp_path / ".env"
+        p.write_text("FOO=bar\nDB_PASS=hunter2longer\n")
+        assert classify_env_file(p) == "seed"
+
+    def test_vault_ref_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+        p = tmp_path / ".env"
+        p.write_text('FOO=vault("FOO")\n')
+        assert classify_env_file(p) == "bootstrap"
+
+    def test_mixed_file_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+        """Vault refs win when both shapes are present (teammate-clone case)."""
+        p = tmp_path / ".env"
+        p.write_text('FOO=vault("FOO")\nLEFTOVER=plain-value\n')
+        assert classify_env_file(p) == "bootstrap"
+
+    def test_vault_with_kwargs_still_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+        p = tmp_path / ".env"
+        p.write_text('PROD_KEY=vault("PROD_KEY", env="production")\n')
+        assert classify_env_file(p) == "bootstrap"
+
+    def test_word_vault_in_value_is_not_a_vault_call(self, tmp_path: Path) -> None:
+        """Bare ``vault`` words shouldn't trigger bootstrap routing."""
+        p = tmp_path / ".env"
+        p.write_text("HASHICORP_VAULT_TOKEN=hvs.abcdefghij\n")
+        assert classify_env_file(p) == "seed"
 
 
 def test_default_env_candidates_is_a_tuple_of_strings() -> None:
