@@ -228,32 +228,47 @@ def _offer_import_after_init(vault_path: Path, passphrase: str) -> None:
     )
 
 
-@app.command()
-def init(
-    global_vault: bool = typer.Option(False, "--global", help="Create global vault at ~/.ownlock/ (passphrase in keyring)."),
-) -> None:
-    """Create a new vault, then offer to import an existing .env if one is present."""
-    project_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
+def _init_global_vault() -> None:
+    """Create the global vault and store its passphrase in the keyring.
 
-    if global_vault:
-        # Global-only: create global vault and keyring
-        if GLOBAL_VAULT_PATH.exists():
-            console.print(f"[yellow]Vault already exists at {_format_vault_path(GLOBAL_VAULT_PATH)}[/yellow]")
-            raise typer.Exit(0)
-        passphrase = _prompt_new_passphrase()
-        VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
-        _save_passphrase_to_keyring(passphrase)
-        audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
-        console.print(f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]")
-        return
+    Aborts cleanly if the global vault already exists. Used by ``init
+    --global`` and as a step inside the first-run combined ``init``.
+    """
+    if GLOBAL_VAULT_PATH.exists():
+        console.print(
+            f"[yellow]Vault already exists at {_format_vault_path(GLOBAL_VAULT_PATH)}[/yellow]"
+        )
+        raise typer.Exit(0)
+    passphrase = _prompt_new_passphrase()
+    VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
+    _save_passphrase_to_keyring(passphrase)
+    audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
+    console.print(
+        f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]"
+    )
 
-    # Project vault (keyring-first: ensure global + keyring on first run)
+
+def _init_project_vault(project_path: Path) -> None:
+    """Create a project vault, ensuring the global vault + keyring exist first.
+
+    Three branches:
+
+    * Project vault already there → friendly message, exit 0.
+    * No global vault yet → prompt for a passphrase, create both the global
+      and the project vault with it, store in the keyring.
+    * Global already there → reuse its keyring passphrase to create the
+      project vault silently (no prompt).
+
+    After a fresh project vault is created we offer the onboarding import
+    flow if a ``.env`` is sitting in cwd.
+    """
     if project_path.exists():
-        console.print(f"[yellow]Vault already exists at {_format_vault_path(project_path)}[/yellow]")
+        console.print(
+            f"[yellow]Vault already exists at {_format_vault_path(project_path)}[/yellow]"
+        )
         raise typer.Exit(0)
 
     if not GLOBAL_VAULT_PATH.exists():
-        # First run: create global vault and keyring, then project vault with same passphrase
         passphrase = _prompt_new_passphrase()
         VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
         _save_passphrase_to_keyring(passphrase)
@@ -263,18 +278,34 @@ def init(
         audit.record("init", vault_path=project_path, extra={"scope": "project"})
         console.print(
             f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
-            f"[dim](passphrase in keyring; global vault at {_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
+            f"[dim](passphrase in keyring; global vault at "
+            f"{_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
         )
-        _offer_import_after_init(project_path, passphrase)
-        return
+    else:
+        passphrase = resolve_passphrase()
+        VaultManager.init_vault(project_path, passphrase).close()
+        _ensure_gitignore()
+        audit.record("init", vault_path=project_path, extra={"scope": "project"})
+        console.print(
+            f"[green]Vault created at {_format_vault_path(project_path)}[/green]"
+        )
 
-    # Global exists: create only project vault using keyring passphrase
-    passphrase = resolve_passphrase()
-    VaultManager.init_vault(project_path, passphrase).close()
-    _ensure_gitignore()
-    audit.record("init", vault_path=project_path, extra={"scope": "project"})
-    console.print(f"[green]Vault created at {_format_vault_path(project_path)}[/green]")
     _offer_import_after_init(project_path, passphrase)
+
+
+@app.command()
+def init(
+    global_vault: bool = typer.Option(
+        False,
+        "--global",
+        help="Create global vault at ~/.ownlock/ (passphrase in keyring).",
+    ),
+) -> None:
+    """Create a new vault, then offer to import an existing .env if one is present."""
+    if global_vault:
+        _init_global_vault()
+        return
+    _init_project_vault(Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB)
 
 
 def _read_value_from_editor(name: str) -> str:
