@@ -68,12 +68,18 @@ def write_env_backup(env_file: Path, content: str, *, ensure_gitignore_fn: objec
 
 
 def backup_vault_file(vault_path: Path) -> Path:
-    """Copy *vault_path* to ``.ownlock/backups/vault.db.backup-<UTC>`` (mode 0600).
+    """Copy *vault_path* (and any WAL sidecars) to ``.ownlock/backups/`` (mode 0600).
 
     Used by ``ownlock rekey`` so a partial / failed rekey can never corrupt
     the live vault: the live file is untouched until the SQL transaction
     commits, and the backup copy is left in place after success for the user
     to delete once they're confident.
+
+    SQLite WAL mode keeps recent writes in ``vault.db-wal`` (and a small
+    shared-memory file ``vault.db-shm``) until they're checkpointed back
+    into the main file. We snapshot all three so a hard-killed previous
+    process whose writes are still in the WAL is captured in the backup
+    too — restoring the main file alone would lose those writes.
     """
     backup_dir = vault_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -81,4 +87,12 @@ def backup_vault_file(vault_path: Path) -> Path:
     backup_path = backup_dir / f"{vault_path.name}.backup-{timestamp}"
     backup_path.write_bytes(vault_path.read_bytes())
     _chmod_0600(backup_path)
+
+    for suffix in ("-wal", "-shm"):
+        sidecar = vault_path.with_name(vault_path.name + suffix)
+        if sidecar.exists():
+            sidecar_backup = backup_dir / f"{sidecar.name}.backup-{timestamp}"
+            sidecar_backup.write_bytes(sidecar.read_bytes())
+            _chmod_0600(sidecar_backup)
+
     return backup_path

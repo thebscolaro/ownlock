@@ -61,15 +61,50 @@ class VaultManager:
     def open(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         is_new = not self._db_path.exists() or self._db_path.stat().st_size == 0
-        self._conn = sqlite3.connect(str(self._db_path))
+        # ``timeout=5.0`` is the connection-level lock wait; a separate
+        # ``busy_timeout`` PRAGMA below covers WAL-specific waits. Belt and
+        # suspenders so a competing ``ownlock set`` from another shell waits
+        # rather than crashing with "database is locked".
+        self._conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         self._conn.row_factory = sqlite3.Row
+        self._apply_concurrency_pragmas()
         self._conn.execute(_CREATE_SECRETS)
         self._conn.execute(_CREATE_META)
         self._conn.commit()
         self._ensure_meta(is_new=is_new)
 
+    def _apply_concurrency_pragmas(self) -> None:
+        """Switch SQLite to WAL with a generous busy-timeout.
+
+        WAL (write-ahead log) lets one writer and many readers proceed in
+        parallel from separate processes without corrupting the file —
+        critical for the "agent calls ``ownlock set`` while a dev runs
+        ``ownlock run`` in another terminal" case. ``synchronous=NORMAL``
+        is the WAL-recommended setting (full ``fsync`` on every commit is
+        overkill for a personal vault). ``busy_timeout`` makes a competing
+        writer wait up to 5 seconds for the lock instead of erroring.
+
+        These are session-level pragmas with one exception: ``journal_mode``
+        is persisted by SQLite into the database header, so the very first
+        successful WAL switch sticks for every future open of this file.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+
     def close(self) -> None:
         if self._conn:
+            # Checkpoint WAL into the main DB so the file on disk is
+            # self-contained when no one's holding it open. Best-effort:
+            # if checkpointing fails for any reason (e.g. another writer
+            # currently holds the lock), close the connection anyway.
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.DatabaseError:
+                pass
             self._conn.close()
             self._conn = None
 

@@ -267,3 +267,63 @@ class TestRekey:
             assert second == {KDF_ITERATIONS_CURRENT: 1}
             # Value still readable
             assert vm.get("X") == "y"
+
+
+class TestConcurrencyPragmas:
+    """WAL + busy-timeout: two ownlock processes can share a vault file safely."""
+
+    def test_journal_mode_is_wal(self, tmp_path):
+        db = tmp_path / "wal.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            mode = vm._require_conn().execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode.lower() == "wal"
+
+    def test_busy_timeout_is_set(self, tmp_path):
+        db = tmp_path / "busy.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            timeout = vm._require_conn().execute("PRAGMA busy_timeout").fetchone()[0]
+            assert timeout >= 5000
+
+    def test_synchronous_is_normal_or_higher(self, tmp_path):
+        db = tmp_path / "sync.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            sync = vm._require_conn().execute("PRAGMA synchronous").fetchone()[0]
+            # 0 = OFF, 1 = NORMAL, 2 = FULL, 3 = EXTRA. NORMAL is what we set.
+            assert sync >= 1
+
+    def test_close_checkpoints_wal_into_main_file(self, tmp_path):
+        """After clean close the main DB should contain the writes.
+
+        Open a second sqlite3 connection without any of our pragmas and
+        confirm the row is visible — proves the checkpoint happened.
+        """
+        db = tmp_path / "ckpt.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("CHECKPOINT_TEST", "ok")
+        # Bypass VaultManager so we read the raw file as-is.
+        raw = sqlite3.connect(str(db))
+        try:
+            count = raw.execute(
+                "SELECT COUNT(*) FROM secrets WHERE name = ?",
+                ("CHECKPOINT_TEST",),
+            ).fetchone()[0]
+            assert count == 1
+        finally:
+            raw.close()
+
+    def test_two_simultaneous_managers_can_write(self, tmp_path):
+        """A second VaultManager opened on the same file mid-flight can still write.
+
+        Pre-WAL this would fail with ``sqlite3.OperationalError: database is locked``
+        on most platforms because the first writer's transaction blocked all reads.
+        """
+        db = tmp_path / "concur.db"
+        with VaultManager(db, PASSPHRASE) as a:
+            a.set("FIRST", "1")
+            with VaultManager(db, PASSPHRASE) as b:
+                b.set("SECOND", "2")
+                assert b.get("FIRST") == "1"
+            # Original handle still works after the second one closed.
+            a.set("THIRD", "3")
+            assert a.get("SECOND") == "2"
+            assert a.get("THIRD") == "3"

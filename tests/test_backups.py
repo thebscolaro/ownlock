@@ -92,3 +92,21 @@ def test_backup_vault_file_writes_under_backups_dir(tmp_path: Path) -> None:
     assert backup.read_bytes() == b"sqlite-bytes-here"
     if os.name == "posix":
         assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_backup_vault_file_includes_wal_and_shm_sidecars(tmp_path: Path) -> None:
+    """A vault that's been hard-killed mid-write may still have unmerged WAL data;
+    backup must capture the sidecars so the snapshot is bit-for-bit consistent."""
+    vault = tmp_path / ".ownlock" / "vault.db"
+    vault.parent.mkdir(parents=True)
+    vault.write_bytes(b"main")
+    (vault.parent / "vault.db-wal").write_bytes(b"wal-data")
+    (vault.parent / "vault.db-shm").write_bytes(b"shm-data")
+
+    backup_vault_file(vault)
+    backups = list((vault.parent / "backups").iterdir())
+    names = sorted(b.name for b in backups)
+    # We expect three siblings: main, -wal, -shm — each with the same timestamp suffix.
+    assert any(n.startswith("vault.db.backup-") and "-wal" not in n and "-shm" not in n for n in names)
+    assert any("vault.db-wal.backup-" in n for n in names)
+    assert any("vault.db-shm.backup-" in n for n in names)
