@@ -102,6 +102,36 @@ def test_gather_doctor_state_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert required in state
 
 
+def test_mcp_importable_false_when_mcp_package_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ownlock.doctor import mcp_importable
+
+    def _raise(_name: str):
+        raise ModuleNotFoundError("No module named 'mcp'")
+
+    monkeypatch.setattr("ownlock.doctor.importlib.util.find_spec", _raise)
+    assert mcp_importable() is False
+
+
+def test_gather_doctor_state_without_mcp_does_not_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr(
+        "ownlock.vault.VaultManager.find_project_vault",
+        staticmethod(lambda: None),
+    )
+    monkeypatch.setattr(
+        "ownlock.vault.GLOBAL_VAULT_PATH", tmp_path / "global" / "vault.db"
+    )
+    monkeypatch.setattr("ownlock.doctor.mcp_importable", lambda: False)
+
+    state = gather_doctor_state()
+    assert state["mcp_importable"] is False
+
+
 def test_gather_doctor_state_finds_legacy_backup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".env.ownlock.bak").write_text("OLD=stale")
     monkeypatch.chdir(tmp_path)

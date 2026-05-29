@@ -28,6 +28,18 @@ from typing import Any
 from rich.console import Console
 
 from ownlock import vault as _vault_module
+
+
+def mcp_importable() -> bool:
+    """Return whether the optional ``mcp`` package (``ownlock[mcp]``) is installed.
+
+    ``importlib.util.find_spec`` can raise :class:`ModuleNotFoundError` when a
+    parent package is missing, so this must not crash ``ownlock doctor``.
+    """
+    try:
+        return importlib.util.find_spec("mcp.server.fastmcp") is not None
+    except (ModuleNotFoundError, ValueError, ImportError):
+        return False
 from ownlock.backups import LEGACY_BACKUP_SUFFIX
 from ownlock.crypto import KDF_ITERATIONS_CURRENT
 from ownlock.vault import VaultManager
@@ -145,7 +157,7 @@ def gather_doctor_state() -> dict[str, Any]:
         "project_vault": vault_health(pv) if pv else {"path": None, "exists": False},
         "ownlock_passphrase_env_set": bool(os.environ.get("OWNLOCK_PASSPHRASE")),
         "passphrase_source": passphrase_source(),
-        "mcp_importable": importlib.util.find_spec("mcp.server.fastmcp") is not None,
+        "mcp_importable": mcp_importable(),
     }
     try:
         from ownlock.keyring_util import get_passphrase
