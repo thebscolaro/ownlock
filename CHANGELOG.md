@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Removed `ownlock auto` and `ownlock bootstrap`** (0.1 commands). Use `ownlock import` and `ownlock import --rewrite` instead.
+- **`ownlock import` interactive UX**: cyan numbered pickers for env files and keys (restores the old `auto` feel), multi-file discovery picker when several `.env*` files exist, and clearer rewrite output with file links plus backup on its own line.
+- **`ownlock doctor`**: no longer crashes when the optional `mcp` package is not installed (`mcp_importable` reports `false` instead).
 - **Refactor**: `cli.py` and `vault.py` split into smaller, focused modules — `paths.py`, `envfile.py`, `backups.py`, `scanner.py`, `doctor.py`, `audit.py`. Most commands now compose helpers from these modules instead of inlining the logic.
 
 ### Documentation

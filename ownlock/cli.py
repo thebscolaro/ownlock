@@ -64,6 +64,10 @@ from ownlock.vault import (
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+# Interactive import pickers (key list, env file list) — cyan matches prior ``auto`` UX.
+_STYLE_PICK_HEADER = "bold cyan"
+_STYLE_PICK_ITEM = "cyan"
+
 
 def _safe_command(fn: F) -> F:
     """Catch known exceptions and print clean messages; no traceback."""
@@ -1039,19 +1043,19 @@ def _pick_indexes_interactively(
     *,
     label: Callable[[Any], str],
     cancel_message: str = "Cancelled.",
+    prompt_default: str = "all",
 ) -> list[Any]:
     """Show *items* numbered, prompt for a comma-separated index list, return picks.
 
-    Accepts ``"all"`` or blank (defaults to ``"all"``). Empty input after
-    explicit clearing is treated as cancel and exits the command. De-dupes
-    selections while preserving order. Used by the unified ``import``
-    command for the file picker and the per-key picker.
+    Accepts ``"all"`` when *prompt_default* is ``"all"``. When *prompt_default*
+    is empty, blank input cancels (env file picker). De-dupes selections while
+    preserving order. Used by ``import`` for file and per-key selection.
     """
     if not items:
         return []
     for idx, item in enumerate(items, start=1):
-        console.print(f"  {idx}. {label(item)}")
-    choice = typer.prompt(prompt_text, default="all").strip()
+        console.print(f"  {idx}. [{_STYLE_PICK_ITEM}]{label(item)}[/{_STYLE_PICK_ITEM}]")
+    choice = typer.prompt(prompt_text, default=prompt_default).strip()
     if not choice:
         console.print(f"[dim]{cancel_message}[/dim]")
         raise typer.Exit(1)
@@ -1143,7 +1147,10 @@ def _import_seed_flow(
         if not candidates:
             console.print("[dim]No valid KEY=VALUE entries found to import.[/dim]")
             return
-        console.print(f"Found {len(candidates)} key(s) in {f}:")
+        console.print(
+            f"[{_STYLE_PICK_HEADER}]Found {len(candidates)} key(s) in[/{_STYLE_PICK_HEADER}] "
+            f"{_file_link(f)}:"
+        )
         picked = _pick_indexes_interactively(
             candidates,
             "Enter indexes to import (comma-separated, 'all' for all, blank = cancel)",
@@ -1399,8 +1406,24 @@ def import_env(
         )
         return
 
-    has_vault_refs = any(classify_env_file(f) == "vault_refs" for f in selected_files)
     is_tty = _is_tty()
+    explicit_paths = env_file is not None or files is not None
+    if (
+        is_tty
+        and not yes
+        and not explicit_paths
+        and len(selected_files) > 1
+    ):
+        console.print(f"[{_STYLE_PICK_HEADER}]Found env files:[/{_STYLE_PICK_HEADER}]")
+        selected_files = _pick_indexes_interactively(
+            selected_files,
+            "Select file(s) to import from (comma-separated indexes, 'all' for all, blank = cancel)",
+            label=lambda p: _file_link(p),
+            cancel_message="Import cancelled.",
+            prompt_default="",
+        )
+
+    has_vault_refs = any(classify_env_file(f) == "vault_refs" for f in selected_files)
 
     if has_vault_refs and rewrite:
         # Rewriting a file that already uses vault() is a no-op at best and
