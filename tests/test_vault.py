@@ -141,7 +141,9 @@ class TestMeta:
         conn.close()
 
         with VaultManager(db, PASSPHRASE) as vm:
-            assert vm.schema_version() == 1
+            # Opening a legacy vault infers v1 KDF meta, then auto-migrates names
+            # to schema v3 on first open with the passphrase.
+            assert vm.schema_version() == SCHEMA_VERSION_CURRENT
             assert vm.kdf_iterations() == KDF_ITERATIONS_LEGACY
 
     def test_legacy_v1_token_decrypts_after_meta_migration(self, tmp_path):
@@ -182,16 +184,29 @@ class TestMeta:
 
         with VaultManager(db, PASSPHRASE) as vm:
             assert vm.get("LEGACY_KEY") == plaintext
-            assert vm.schema_version() == 1
+            assert vm.schema_version() == SCHEMA_VERSION_CURRENT
 
     def test_set_writes_v2_token(self, tmp_path):
         db = tmp_path / "v2.db"
         with VaultManager(db, PASSPHRASE) as vm:
             vm.set("KEY", "value")
             row = vm._require_conn().execute(
-                "SELECT value_enc FROM secrets WHERE name = 'KEY'"
+                "SELECT value_enc FROM secrets LIMIT 1"
             ).fetchone()
             assert token_iterations(row["value_enc"]) == KDF_ITERATIONS_CURRENT
+
+    def test_secret_names_not_stored_in_plaintext(self, tmp_path):
+        """Schema v3: copying vault.db without the passphrase hides key names."""
+        db = tmp_path / "hidden.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("API_KEY", "super-secret-value-long")
+
+        raw = db.read_bytes()
+        assert b"API_KEY" not in raw
+        assert b"super-secret-value-long" not in raw
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            assert vm.get("API_KEY") == "super-secret-value-long"
 
 
 class TestRekey:
@@ -205,12 +220,10 @@ class TestRekey:
             assert vm.get("A") == "1"
             assert vm.get("B", env="prod") == "2"
 
-        # Old passphrase no longer works.
+        # Old passphrase no longer resolves rows (lookup ids are passphrase-bound).
         with VaultManager(db, PASSPHRASE) as vm:
-            from cryptography.exceptions import InvalidTag
-
-            with pytest.raises(InvalidTag):
-                vm.get("A")
+            assert vm.get("A") is None
+            assert vm.get("B", env="prod") is None
 
         # New passphrase reads everything.
         with VaultManager(db, "new-passphrase") as vm:
@@ -219,14 +232,16 @@ class TestRekey:
 
     def test_upgrade_kdf_only(self, tmp_path):
         """Rekey with same passphrase but bumped iterations re-encrypts at v2/current."""
+        from ownlock.crypto import secret_name_lookup
+
         db = tmp_path / "kdf.db"
-        # Seed with a v1-style legacy token at LEGACY iterations.
         with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("LEGACY", "v1-data")
+            lookup = secret_name_lookup(PASSPHRASE, "LEGACY", "default")
             legacy_token = encrypt("v1-data", PASSPHRASE, iterations=KDF_ITERATIONS_LEGACY)
             vm._require_conn().execute(
-                "INSERT INTO secrets (name, env, value_enc, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("LEGACY", "default", legacy_token, "2025-01-01", "2025-01-01"),
+                "UPDATE secrets SET value_enc = ? WHERE name_lookup = ?",
+                (legacy_token, lookup),
             )
             vm._require_conn().commit()
 
@@ -234,7 +249,7 @@ class TestRekey:
             count = vm.rekey(PASSPHRASE, target_iterations=KDF_ITERATIONS_CURRENT)
             assert count == 1
             row = vm._require_conn().execute(
-                "SELECT value_enc FROM secrets WHERE name = 'LEGACY'"
+                "SELECT value_enc FROM secrets LIMIT 1"
             ).fetchone()
             assert token_iterations(row["value_enc"]) == KDF_ITERATIONS_CURRENT
             assert vm.get("LEGACY") == "v1-data"
@@ -303,10 +318,7 @@ class TestConcurrencyPragmas:
         # Bypass VaultManager so we read the raw file as-is.
         raw = sqlite3.connect(str(db))
         try:
-            count = raw.execute(
-                "SELECT COUNT(*) FROM secrets WHERE name = ?",
-                ("CHECKPOINT_TEST",),
-            ).fetchone()[0]
+            count = raw.execute("SELECT COUNT(*) FROM secrets").fetchone()[0]
             assert count == 1
         finally:
             raw.close()

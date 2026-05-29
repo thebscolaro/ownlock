@@ -84,6 +84,22 @@ class TestTokenFormat:
         assert token_iterations(token) == 210_000
         assert decrypt(token, PASSPHRASE) == "x"
 
+    def test_secret_name_lookup_is_passphrase_bound(self):
+        from ownlock.crypto import secret_name_lookup
+
+        a = secret_name_lookup(PASSPHRASE, "API_KEY", "default")
+        b = secret_name_lookup(PASSPHRASE, "API_KEY", "production")
+        c = secret_name_lookup("other-pass", "API_KEY", "default")
+        assert a != b
+        assert a != c
+        assert secret_name_lookup(PASSPHRASE, "API_KEY", "default") == a
+
+    def test_encrypt_decrypt_name_roundtrip(self):
+        from ownlock.crypto import decrypt_name, encrypt_name
+
+        token = encrypt_name("MY_SECRET", PASSPHRASE)
+        assert decrypt_name(token, PASSPHRASE) == "MY_SECRET"
+
     def test_rejects_absurd_iteration_count_in_v2_token(self):
         """Corrupt tokens must not trigger unbounded PBKDF2 work."""
         raw = b"v2" + (99_999_999).to_bytes(4, "big") + os.urandom(SALT_LEN + NONCE_LEN + 32)

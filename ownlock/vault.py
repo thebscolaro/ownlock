@@ -12,7 +12,10 @@ from ownlock.crypto import (
     KDF_ITERATIONS_CURRENT,
     KDF_ITERATIONS_LEGACY,
     decrypt,
+    decrypt_name,
     encrypt,
+    encrypt_name,
+    secret_name_lookup,
     token_iterations,
 )
 
@@ -23,12 +26,16 @@ PROJECT_VAULT_DB = "vault.db"
 
 # Schema versions:
 #   1 — pre-0.2.0 vaults; no meta table; secrets stored as v1 tokens (no
-#       iteration count, decrypts at the legacy 200_000 default).
+#       iteration count, decrypts at the legacy 200_000 default). Secret
+#       names in cleartext.
 #   2 — 0.2.0+; meta table present; new secrets written as v2 tokens carrying
-#       their iteration count. v1 tokens still decrypt fine until rekeyed.
-SCHEMA_VERSION_CURRENT = 2
+#       their iteration count. Secret names still in cleartext.
+#   3 — 0.2.0+; secret names encrypted at rest; rows keyed by HMAC lookup id.
+SCHEMA_VERSION_CURRENT = 3
 
-_CREATE_SECRETS = """
+# Legacy table shape (v1/v2) — kept so existing vaults open cleanly before
+# migration runs.
+_CREATE_SECRETS_LEGACY = """
 CREATE TABLE IF NOT EXISTS secrets (
     name       TEXT NOT NULL,
     env        TEXT NOT NULL DEFAULT 'default',
@@ -36,6 +43,18 @@ CREATE TABLE IF NOT EXISTS secrets (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (name, env)
+);
+"""
+
+_CREATE_SECRETS = """
+CREATE TABLE IF NOT EXISTS secrets (
+    name_lookup TEXT NOT NULL,
+    name_enc    TEXT NOT NULL,
+    env         TEXT NOT NULL DEFAULT 'default',
+    value_enc   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (name_lookup)
 );
 """
 
@@ -69,10 +88,14 @@ class VaultManager:
         self._conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         self._conn.row_factory = sqlite3.Row
         self._apply_concurrency_pragmas()
-        self._conn.execute(_CREATE_SECRETS)
+        if is_new:
+            self._conn.execute(_CREATE_SECRETS)
+        else:
+            self._conn.execute(_CREATE_SECRETS_LEGACY)
         self._conn.execute(_CREATE_META)
         self._conn.commit()
         self._ensure_meta(is_new=is_new)
+        self._ensure_secrets_schema()
         if os.name == "posix" and self._db_path.exists():
             try:
                 os.chmod(self._db_path, 0o600)
@@ -162,6 +185,61 @@ class VaultManager:
         )
         conn.commit()
 
+    def _secrets_columns(self) -> set[str]:
+        conn = self._require_conn()
+        return {
+            row[1] for row in conn.execute("PRAGMA table_info(secrets)").fetchall()
+        }
+
+    def _uses_encrypted_names(self) -> bool:
+        return "name_lookup" in self._secrets_columns()
+
+    def _ensure_secrets_schema(self) -> None:
+        """Upgrade legacy plaintext-name vaults to schema v3 on first open."""
+        if self._uses_encrypted_names():
+            return
+
+        conn = self._require_conn()
+        cols = self._secrets_columns()
+        if "name" not in cols:
+            # Empty or unexpected shape — recreate as v3.
+            conn.execute("DROP TABLE IF EXISTS secrets")
+            conn.execute(_CREATE_SECRETS)
+            conn.commit()
+            if int(self.get_meta().get("schema_version", "1")) < SCHEMA_VERSION_CURRENT:
+                self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
+                conn.commit()
+            return
+
+        rows = conn.execute(
+            "SELECT name, env, value_enc, created_at, updated_at FROM secrets"
+        ).fetchall()
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ALTER TABLE secrets RENAME TO secrets_legacy")
+        conn.execute(_CREATE_SECRETS)
+        for row in rows:
+            name = row["name"]
+            env = row["env"]
+            lookup = secret_name_lookup(self._passphrase, name, env)
+            name_enc = encrypt_name(name, self._passphrase)
+            conn.execute(
+                """INSERT INTO secrets
+                   (name_lookup, name_enc, env, value_enc, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    lookup,
+                    name_enc,
+                    env,
+                    row["value_enc"],
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
+        conn.execute("DROP TABLE secrets_legacy")
+        self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
+        conn.commit()
+
     def get_meta(self) -> dict[str, str]:
         """Return the meta table as a plain dict.
 
@@ -200,21 +278,29 @@ class VaultManager:
         """Store or update a secret. New writes use the current KDF default."""
         conn = self._require_conn()
         now = datetime.now(UTC).isoformat()
-        enc = encrypt(value, self._passphrase, iterations=KDF_ITERATIONS_CURRENT)
+        value_token = encrypt(value, self._passphrase, iterations=KDF_ITERATIONS_CURRENT)
+        lookup = secret_name_lookup(self._passphrase, name, env)
+        name_token = encrypt_name(name, self._passphrase)
         conn.execute(
-            """INSERT INTO secrets (name, env, value_enc, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT (name, env) DO UPDATE SET value_enc = ?, updated_at = ?""",
-            (name, env, enc, now, now, enc, now),
+            """INSERT INTO secrets
+               (name_lookup, name_enc, env, value_enc, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (name_lookup) DO UPDATE SET
+                 name_enc = excluded.name_enc,
+                 env = excluded.env,
+                 value_enc = excluded.value_enc,
+                 updated_at = excluded.updated_at""",
+            (lookup, name_token, env, value_token, now, now),
         )
         conn.commit()
 
     def get(self, name: str, env: str = "default") -> Optional[str]:
         """Retrieve and decrypt a secret. Returns None if not found."""
         conn = self._require_conn()
+        lookup = secret_name_lookup(self._passphrase, name, env)
         row = conn.execute(
-            "SELECT value_enc FROM secrets WHERE name = ? AND env = ?",
-            (name, env),
+            "SELECT value_enc FROM secrets WHERE name_lookup = ?",
+            (lookup,),
         ).fetchone()
         if row is None:
             return None
@@ -223,9 +309,10 @@ class VaultManager:
     def delete(self, name: str, env: str = "default") -> bool:
         """Delete a secret. Returns True if it existed."""
         conn = self._require_conn()
+        lookup = secret_name_lookup(self._passphrase, name, env)
         cursor = conn.execute(
-            "DELETE FROM secrets WHERE name = ? AND env = ?",
-            (name, env),
+            "DELETE FROM secrets WHERE name_lookup = ?",
+            (lookup,),
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -235,23 +322,41 @@ class VaultManager:
         conn = self._require_conn()
         if env:
             rows = conn.execute(
-                "SELECT name, env, created_at, updated_at FROM secrets WHERE env = ? ORDER BY name",
+                "SELECT name_enc, env, created_at, updated_at FROM secrets "
+                "WHERE env = ? ORDER BY created_at",
                 (env,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT name, env, created_at, updated_at FROM secrets ORDER BY name, env"
+                "SELECT name_enc, env, created_at, updated_at FROM secrets "
+                "ORDER BY created_at"
             ).fetchall()
-        return [dict(r) for r in rows]
+        out: list[dict[str, str]] = []
+        for row in rows:
+            out.append(
+                {
+                    "name": decrypt_name(row["name_enc"], self._passphrase),
+                    "env": row["env"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        out.sort(key=lambda r: (r["name"], r["env"]))
+        return out
 
     def get_all_decrypted(self, env: str = "default") -> dict[str, str]:
         """Decrypt all secrets for an env. Used by the resolver."""
         conn = self._require_conn()
         rows = conn.execute(
-            "SELECT name, value_enc FROM secrets WHERE env = ?",
+            "SELECT name_enc, value_enc FROM secrets WHERE env = ?",
             (env,),
         ).fetchall()
-        return {row["name"]: decrypt(row["value_enc"], self._passphrase) for row in rows}
+        return {
+            decrypt_name(row["name_enc"], self._passphrase): decrypt(
+                row["value_enc"], self._passphrase
+            )
+            for row in rows
+        }
 
     def secret_iterations_summary(self) -> dict[int, int]:
         """Return a histogram of KDF iterations across stored ciphertexts.
@@ -286,25 +391,31 @@ class VaultManager:
         """
         conn = self._require_conn()
         rows = conn.execute(
-            "SELECT name, env, value_enc FROM secrets"
+            "SELECT name_lookup, name_enc, env, value_enc FROM secrets"
         ).fetchall()
 
-        re_enc: list[tuple[str, str, str, str]] = []
+        re_enc: list[tuple[str, str, str, str, str, str]] = []
         now = datetime.now(UTC).isoformat()
         for row in rows:
+            name = decrypt_name(row["name_enc"], self._passphrase)
+            env = row["env"]
             plaintext = decrypt(row["value_enc"], self._passphrase)
-            new_token = encrypt(
+            new_lookup = secret_name_lookup(new_passphrase, name, env)
+            new_name_enc = encrypt_name(name, new_passphrase)
+            new_value_enc = encrypt(
                 plaintext, new_passphrase, iterations=target_iterations
             )
-            re_enc.append((new_token, now, row["name"], row["env"]))
+            re_enc.append(
+                (new_lookup, new_name_enc, env, new_value_enc, now, row["name_lookup"])
+            )
 
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for token, ts, name, env in re_enc:
+            for lookup, name_enc, env, value_enc, ts, old_lookup in re_enc:
                 conn.execute(
-                    "UPDATE secrets SET value_enc = ?, updated_at = ? "
-                    "WHERE name = ? AND env = ?",
-                    (token, ts, name, env),
+                    """UPDATE secrets SET name_lookup = ?, name_enc = ?, env = ?,
+                       value_enc = ?, updated_at = ? WHERE name_lookup = ?""",
+                    (lookup, name_enc, env, value_enc, ts, old_lookup),
                 )
             self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
             self._upsert_meta_row("kdf_iterations", str(target_iterations))

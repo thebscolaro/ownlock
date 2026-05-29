@@ -14,6 +14,7 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **Encryption**: Secrets are encrypted with AES-256-GCM. Each secret has a fresh random 16-byte salt and 12-byte nonce; ciphertext + 128-bit GCM tag are stored together.
 - **Key derivation**: PBKDF2-HMAC-SHA256. New vaults default to **600,000 iterations** (matching OWASP 2023 guidance for PBKDF2-SHA256). Vaults predating ownlock 0.2.0 are at 200,000 iterations and can be upgraded with `ownlock rekey --upgrade-kdf`.
 - **Versioned ciphertext**: Each stored value carries a small format prefix (v1 legacy, v2 with embedded iteration count). A vault can hold a mix during a partial migration; ``decrypt`` auto-detects.
+- **Encrypted secret names (schema v3)**: Rows are keyed by ``HMAC-SHA256(passphrase-derived-key, name + env)``; the human-readable name is stored as an AES-GCM ciphertext. Without the passphrase, neither names nor values are recoverable from ``vault.db``. Legacy v1/v2 vaults migrate automatically on first open.
 - **Vault metadata**: A `meta` table records `schema_version`, `kdf_algo`, `kdf_iterations`, and `created_at`. `ownlock doctor` reports these without needing the passphrase.
 - **Passphrase resolution order**: `OWNLOCK_PASSPHRASE` env var → system keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) → interactive prompt. The env var wins so CI / scripts can override the keyring.
 - **Passphrase isolation in `run`**: `OWNLOCK_PASSPHRASE` and `OWNLOCK_NEW_PASSPHRASE` are stripped from the parent environment before launching child processes via `ownlock run`. Resolved secret values still reach the child as regular environment variables, but the master passphrase that unlocks the vault never does.
@@ -24,7 +25,7 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **Path safety**: Relative paths for `.env` files and scan directories are validated to stay within the current directory.
 - **Subprocess**: `ownlock run` passes the command as a list to the OS exec APIs. No shell interpretation. Secrets are injected as environment variables.
 - **Redaction**: Values injected into the child process by `ownlock run` are replaced with `[REDACTED:NAME]` in subprocess stdout/stderr — both vault-resolved secrets and inline `.env` literals (common during migration). Use `--no-redact-stdout` only when you explicitly need raw output.
-- **Vault metadata leakage**: Secret **names** (not values) are stored in cleartext in `vault.db` (`name`, `env`, timestamps). Anyone with a copy of the file learns which keys exist without the passphrase. Treat `vault.db` like a sensitive file (0600 permissions, never commit).
+- **Vault metadata leakage**: Secret **names** and **values** are encrypted at rest in schema v3 vaults (auto-migrated on first open with your passphrase). Older v1/v2 vaults stored names in cleartext until upgraded. The `meta` table still records non-secret fields (`schema_version`, KDF parameters) without the passphrase. Treat `vault.db` like a sensitive file (0600 permissions, never commit).
 - **MCP** (optional, `ownlock[mcp]`): The stdio MCP server does not load the vault or decrypt in-process. It delegates to the `ownlock` CLI via subprocess; `get` / `export` are not exposed as MCP tools.
 
 ## Security testing

@@ -38,6 +38,10 @@ KDF_ITERATIONS_CURRENT = 600_000
 # trigger unbounded PBKDF2 work on every get/decrypt.
 _MAX_KDF_ITERATIONS = 2_000_000
 
+# Domain-separated salt for deriving the HMAC key used to index secrets by
+# (name, env) without storing plaintext names in SQLite.
+_NAME_LOOKUP_KEY_SALT = b"ownlock-v3-name-lookup-key-v1"
+
 # Public alias kept for back-compat with anything that imported this constant
 # from older versions; the real default is KDF_ITERATIONS_CURRENT.
 KDF_ITERATIONS = KDF_ITERATIONS_CURRENT
@@ -110,3 +114,40 @@ def token_iterations(token: str) -> int:
             raise ValueError("Invalid KDF iteration count in token")
         return iters
     return KDF_ITERATIONS_LEGACY
+
+
+def name_lookup_key(passphrase: str) -> bytes:
+    """Derive the vault-specific HMAC key for secret-name indexing.
+
+    Separate from value-encryption keys so name lookups never reuse a salt
+    that also protects a ciphertext block. The derivation uses the current
+    KDF iteration count; ``rekey`` recomputes every ``name_lookup`` when the
+    passphrase rotates.
+    """
+    return derive_key(passphrase, _NAME_LOOKUP_KEY_SALT, KDF_ITERATIONS_CURRENT)
+
+
+def secret_name_lookup(passphrase: str, name: str, env: str) -> str:
+    """Return a deterministic, passphrase-bound lookup id for *(name, env)*.
+
+    Stored as the primary key in schema v3 vaults so ``get`` / ``set`` /
+    ``delete`` can find rows without persisting cleartext secret names.
+    Without the passphrase the lookup ids are unlinkable to human-readable
+    names.
+    """
+    import hmac
+    import hashlib
+
+    key = name_lookup_key(passphrase)
+    msg = f"{name}\0{env}".encode("utf-8")
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def encrypt_name(name: str, passphrase: str) -> str:
+    """Encrypt a secret name for storage (same v2 token format as values)."""
+    return encrypt(name, passphrase, iterations=KDF_ITERATIONS_CURRENT)
+
+
+def decrypt_name(token: str, passphrase: str) -> str:
+    """Decrypt a stored secret name."""
+    return decrypt(token, passphrase)
