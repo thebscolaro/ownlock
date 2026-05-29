@@ -123,7 +123,7 @@ def collect_vault_refs(env_path: Path) -> list[dict[str, Optional[str]]]:
 
     Each entry is a dict with keys ``key``, ``env_arg`` (the explicit
     ``env="..."`` from the call, or ``None``), ``project``, ``use_global``.
-    Used by ``ownlock bootstrap`` to figure out which secrets a project's
+    Used by ``ownlock import`` (vault_refs flow) to figure out which secrets a project's
     ``.env`` expects without decrypting anything.
     """
     refs: list[dict[str, Optional[str]]] = []

@@ -142,7 +142,7 @@ def vault_path_for_ref(
     """Pick the vault file for a single ``vault(...)`` reference.
 
     Mirrors :class:`ownlock.resolver.VaultLookup` selection rules so
-    ``import`` bootstrap writes land in the same vault ``run`` reads from.
+    ``import`` vault_refs writes land in the same vault ``run`` reads from.
     """
     use_global = (global_flag == "true") if global_flag else None
     project = (project_flag == "true") if project_flag else None

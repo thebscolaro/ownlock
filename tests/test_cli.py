@@ -239,10 +239,10 @@ class TestInit:
         # File untouched.
         assert (tmp_path / ".env").read_text() == "FOO=bar-value\n"
 
-    def test_init_bootstrap_onboarding_for_vault_refs(
+    def test_init_vault_refs_onboarding(
         self, tmp_path, monkeypatch
     ):
-        """Init with an existing vault()-style .env runs bootstrap, not seed import."""
+        """Init with an existing vault()-style .env runs vault_refs flow, not seed import."""
         monkeypatch.chdir(tmp_path)
         env_file = tmp_path / ".env"
         env_file.write_text('NEEDED=vault("NEEDED")\n')
@@ -263,8 +263,8 @@ class TestInit:
             staticmethod(lambda: None),
         )
 
-        # y = import now; bootstrap path uses --values-from in real life but
-        # init calls _import_bootstrap_flow interactively — mock getpass.
+        # y = import now; vault_refs path uses --values-from in real life but
+        # init calls _import_vault_refs_flow interactively — mock getpass.
         monkeypatch.setattr(
             "ownlock.cli.getpass.getpass",
             lambda prompt="": "from-teammate",
@@ -424,7 +424,7 @@ class TestDoctor:
         assert "ownlock_version" in data
         assert "global_vault" in data
         assert data["global_vault"]["exists"] is True
-        assert data["global_vault"]["schema_version"] == 2
+        assert data["global_vault"]["schema_version"] == 3
         assert data["global_vault"]["secret_count"] == 1
         assert data["passphrase_source"] in {"env var", "keyring", "would prompt"}
 
@@ -501,15 +501,15 @@ class TestImport:
         assert result.exit_code == 0
         assert "one" in result.output
 
-    def test_import_routes_to_bootstrap_when_file_has_vault_refs(
+    def test_import_routes_to_vault_refs_when_file_has_vault_refs(
         self, tmp_path, vault_db, monkeypatch
     ):
-        """A file containing vault(...) refs triggers bootstrap-style prompting."""
+        """A file containing vault(...) refs triggers vault_refs fill prompting."""
         VaultManager.init_vault(vault_db, PASSPHRASE).close()
         env_file = tmp_path / ".env"
         env_file.write_text('NEEDED=vault("NEEDED")\n')
         values_file = tmp_path / "v.json"
-        values_file.write_text(json.dumps({"NEEDED": "from-bootstrap"}))
+        values_file.write_text(json.dumps({"NEEDED": "from-import"}))
         monkeypatch.chdir(tmp_path)
 
         result = runner.invoke(
@@ -518,7 +518,7 @@ class TestImport:
         assert result.exit_code == 0
         assert "Stored 1 secret" in result.output
         with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("NEEDED") == "from-bootstrap"
+            assert vm.get("NEEDED") == "from-import"
 
     def test_import_with_rewrite_flag_seeds_then_rewrites(
         self, tmp_path, vault_db, monkeypatch
@@ -538,6 +538,14 @@ class TestImport:
         with VaultManager(vault_db, PASSPHRASE) as vm:
             assert vm.get("API_KEY") == "secret-value"
         assert 'API_KEY=vault("API_KEY")' in env_file.read_text()
+        assert "Imported" in result.output
+        assert "Rewrote" in result.output
+        assert "Backup saved to" in result.output
+        # Rewrite summary and backup path are separate lines (not one green blob).
+        rewrite_line = next(l for l in result.output.splitlines() if "Rewrote" in l)
+        backup_line = next(l for l in result.output.splitlines() if "Backup saved to" in l)
+        assert rewrite_line != backup_line
+        assert "Backup saved to" not in rewrite_line
 
     def test_import_warns_when_rewrite_used_with_vault_ref_file(
         self, tmp_path, vault_db, monkeypatch
@@ -590,7 +598,7 @@ class TestImport:
             assert vm.get("KA") == "va"
             assert vm.get("KB") == "vb"
 
-    def test_import_bootstrap_writes_global_ref_to_global_vault(
+    def test_import_vault_refs_writes_global_ref_to_global_vault(
         self, tmp_path, monkeypatch
     ):
         """vault('KEY', global=true) is stored in the global vault, not project."""
@@ -625,46 +633,6 @@ class TestImport:
         with VaultManager(project_path, PASSPHRASE) as vm:
             assert vm.get("GTOKEN") is None
 
-
-class TestDeprecatedAliases:
-    """`auto` and `bootstrap` are kept as hidden aliases; they should still work."""
-
-    def test_auto_alias_runs_import_with_rewrite(self, tmp_path, vault_db, monkeypatch):
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        env_file = tmp_path / ".env"
-        env_file.write_text("LEGACY=old-value\n")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(
-            "ownlock.cli._resolve_vault_path",
-            lambda global_vault=False, project=False: vault_db,
-        )
-
-        result = runner.invoke(app, ["auto", "-f", str(env_file), "--yes"])
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("LEGACY") == "old-value"
-        assert 'LEGACY=vault("LEGACY")' in env_file.read_text()
-
-    def test_bootstrap_alias_runs_import_in_bootstrap_mode(
-        self, tmp_path, vault_db, monkeypatch
-    ):
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        env_file = tmp_path / ".env"
-        env_file.write_text('NEED=vault("NEED")\n')
-        values_file = tmp_path / "v.json"
-        values_file.write_text(json.dumps({"NEED": "answer"}))
-        monkeypatch.chdir(tmp_path)
-
-        result = runner.invoke(
-            app,
-            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
-        )
-        assert result.exit_code == 0, result.output
-        assert "deprecated" in result.output
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("NEED") == "answer"
-
     def test_import_skips_invalid_keys_and_comments(self, tmp_path, vault_db):
         """Import skips comments, blank lines, and invalid key names."""
         VaultManager.init_vault(vault_db, PASSPHRASE).close()
@@ -690,6 +658,90 @@ class TestDeprecatedAliases:
         assert "ok" in result.output
         result = runner.invoke(app, ["get", "invalid.name"])
         assert result.exit_code == 1
+
+    def test_import_vault_refs_with_values_from_json(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """Missing keys are read from --values-from; existing keys untouched."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("ALREADY_THERE", "x")
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            'API_KEY=vault("API_KEY")\n'
+            'DB_URL=vault("DB_URL")\n'
+            'KNOWN=vault("ALREADY_THERE")\n'
+            "PLAIN=hello\n"
+        )
+
+        values_file = tmp_path / "values.json"
+        values_file.write_text(json.dumps({"API_KEY": "ak-123", "DB_URL": "postgres://"}))
+
+        monkeypatch.chdir(tmp_path)
+
+        result = runner.invoke(
+            app,
+            ["import", str(env_file), "--values-from", str(values_file)],
+        )
+        assert result.exit_code == 0
+        assert "Missing 2 secret(s)" in result.output
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("API_KEY") == "ak-123"
+            assert vm.get("DB_URL") == "postgres://"
+            assert vm.get("ALREADY_THERE") == "x"
+
+    def test_import_vault_refs_idempotent_when_all_present(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("K1", "v1")
+            vm.set("K2", "v2")
+
+        env_file = tmp_path / ".env"
+        env_file.write_text('A=vault("K1")\nB=vault("K2")\n')
+
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["import", str(env_file)])
+        assert result.exit_code == 0
+        assert "already populated" in result.output
+
+    def test_import_vault_refs_non_interactive_without_values_errors(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('NEED=vault("NEED")\n')
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("ownlock.cli._is_tty", lambda: False)
+        result = runner.invoke(app, ["import", str(env_file)])
+        assert result.exit_code == 1
+        assert "values-from" in result.output
+
+    def test_import_vault_refs_picks_up_env_argument(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """vault('K', env='production') is checked against the production env."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text('PROD_KEY=vault("PROD_KEY", env="production")\n')
+
+        values_file = tmp_path / "v.json"
+        values_file.write_text(json.dumps({"PROD_KEY": "secret-prod"}))
+
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(
+            app,
+            ["import", str(env_file), "--values-from", str(values_file)],
+        )
+        assert result.exit_code == 0
+
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            assert vm.get("PROD_KEY", env="production") == "secret-prod"
+            assert vm.get("PROD_KEY") is None
 
     def test_import_with_global_uses_global_vault(self, tmp_path, vault_db):
         """Import with --global stores in global vault; get --global retrieves."""
@@ -809,31 +861,6 @@ class TestRewriteEnv:
         assert ".env.ownlock.bak" in result.output
 
 
-class TestAuto:
-    def test_auto_imports_and_rewrites_env_with_yes(self, tmp_path, vault_db, monkeypatch):
-        """auto -f .env --yes imports and rewrites .env without prompts."""
-        # Prepare plaintext env
-        env_file = tmp_path / ".env"
-        env_file.write_text("AUTO_KEY=auto-value\n")
-
-        # Ensure GLOBAL_VAULT_PATH points at our tmp vault and resolve_vault_path uses it
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr("ownlock.cli.GLOBAL_VAULT_PATH", vault_db)
-        monkeypatch.setattr(
-            "ownlock.cli._resolve_vault_path",
-            lambda global_vault=False, project=False: vault_db,
-        )
-
-        result = runner.invoke(app, ["auto", "-f", str(env_file), "--yes"])
-        assert result.exit_code == 0
-
-        # Key should be in the vault and .env rewritten to use vault()
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("AUTO_KEY") == "auto-value"
-        text = env_file.read_text()
-        assert 'AUTO_KEY=vault("AUTO_KEY")' in text
-
-
 class TestExport:
     def test_export_prints_resolved(self, tmp_path, vault_db, seeded_vault):
         env_file = tmp_path / ".env"
@@ -857,6 +884,26 @@ class TestExport:
         result = runner.invoke(app, ["export", "--example", "--env", "staging"])
         assert result.exit_code == 0
         assert 'OTHER=vault("OTHER", env="staging")' in result.output.strip()
+
+    def test_export_docker_format_quotes_special_characters(
+        self, tmp_path, vault_db, seeded_vault
+    ):
+        """Docker -e style output must quote values with spaces, quotes, or newlines."""
+        with VaultManager(vault_db, PASSPHRASE) as vm:
+            vm.set("DOCKER_KEY", 'say "hello"\nworld')
+
+        env_file = tmp_path / ".env"
+        env_file.write_text('DOCKER_KEY=vault("DOCKER_KEY")\n')
+
+        result = runner.invoke(
+            app, ["export", "-f", str(env_file), "--format", "docker"]
+        )
+        assert result.exit_code == 0
+        line = result.output.strip()
+        assert line.startswith("DOCKER_KEY=")
+        # Value must be shell-safe: wrapped in double quotes with escapes.
+        assert '\\"' in line or "hello" in line
+        assert "say" in line
 
 
 class TestRun:
@@ -980,93 +1027,6 @@ class TestCompletion:
         assert "Unsupported" in result.output
 
 
-class TestBootstrap:
-    """ownlock bootstrap: fill in missing vault() references for new teammates."""
-
-    def test_bootstrap_with_values_from_json(self, tmp_path, vault_db, monkeypatch):
-        """Missing keys are read from --values-from and stored; existing keys untouched."""
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            vm.set("ALREADY_THERE", "x")
-
-        env_file = tmp_path / ".env"
-        env_file.write_text(
-            'API_KEY=vault("API_KEY")\n'
-            'DB_URL=vault("DB_URL")\n'
-            'KNOWN=vault("ALREADY_THERE")\n'
-            "PLAIN=hello\n"
-        )
-
-        values_file = tmp_path / "values.json"
-        values_file.write_text(json.dumps({"API_KEY": "ak-123", "DB_URL": "postgres://"}))
-
-        monkeypatch.chdir(tmp_path)
-
-        result = runner.invoke(
-            app,
-            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
-        )
-        assert result.exit_code == 0
-        assert "Missing 2 secret(s)" in result.output
-
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("API_KEY") == "ak-123"
-            assert vm.get("DB_URL") == "postgres://"
-            assert vm.get("ALREADY_THERE") == "x"
-
-    def test_bootstrap_idempotent_when_all_present(self, tmp_path, vault_db, monkeypatch):
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            vm.set("K1", "v1")
-            vm.set("K2", "v2")
-
-        env_file = tmp_path / ".env"
-        env_file.write_text('A=vault("K1")\nB=vault("K2")\n')
-
-        monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["bootstrap", "-f", str(env_file)])
-        assert result.exit_code == 0
-        assert "already populated" in result.output
-
-    def test_bootstrap_no_env_files(self, tmp_path, vault_db, monkeypatch):
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["bootstrap"])
-        assert result.exit_code == 0
-        assert "No env files found" in result.output
-
-    def test_bootstrap_non_interactive_without_values_errors(self, tmp_path, vault_db, monkeypatch):
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        env_file = tmp_path / ".env"
-        env_file.write_text('NEED=vault("NEED")\n')
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr("ownlock.cli._is_tty", lambda: False)
-        result = runner.invoke(app, ["bootstrap", "-f", str(env_file)])
-        assert result.exit_code == 1
-        assert "values-from" in result.output
-
-    def test_bootstrap_picks_up_env_argument(self, tmp_path, vault_db, monkeypatch):
-        """vault('K', env='production') is checked against the production env."""
-        VaultManager.init_vault(vault_db, PASSPHRASE).close()
-        env_file = tmp_path / ".env"
-        env_file.write_text('PROD_KEY=vault("PROD_KEY", env="production")\n')
-
-        values_file = tmp_path / "v.json"
-        values_file.write_text(json.dumps({"PROD_KEY": "secret-prod"}))
-
-        monkeypatch.chdir(tmp_path)
-        result = runner.invoke(
-            app,
-            ["bootstrap", "-f", str(env_file), "--values-from", str(values_file)],
-        )
-        assert result.exit_code == 0
-
-        with VaultManager(vault_db, PASSPHRASE) as vm:
-            assert vm.get("PROD_KEY", env="production") == "secret-prod"
-            assert vm.get("PROD_KEY") is None
-
-
 class TestRekey:
     """ownlock rekey: passphrase rotation and KDF upgrade."""
 
@@ -1088,12 +1048,9 @@ class TestRekey:
         assert result.exit_code == 0, result.output
         assert "Re-encrypted" in result.output
 
-        # Old passphrase is broken; new one works.
-        from cryptography.exceptions import InvalidTag
-
+        # Old passphrase no longer resolves rows after rotation.
         with _VM(vault_db, PASSPHRASE) as vm:
-            with pytest.raises(InvalidTag):
-                vm.get("MY_KEY")
+            assert vm.get("MY_KEY") is None
         with _VM(vault_db, "rotated-pp-x") as vm:
             assert vm.get("MY_KEY") == "my-value"
 
@@ -1133,17 +1090,18 @@ class TestRekey:
             KDF_ITERATIONS_CURRENT,
             KDF_ITERATIONS_LEGACY,
             encrypt as _encrypt,
+            secret_name_lookup,
             token_iterations as _ti,
         )
         from ownlock.vault import VaultManager as _VM
 
-        # Seed a vault and inject a legacy-iteration token.
         with _VM(vault_db, PASSPHRASE) as vm:
+            vm.set("CLASSIC", "classic")
+            lookup = secret_name_lookup(PASSPHRASE, "CLASSIC", "default")
             legacy = _encrypt("classic", PASSPHRASE, iterations=KDF_ITERATIONS_LEGACY)
             vm._require_conn().execute(
-                "INSERT INTO secrets (name, env, value_enc, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("CLASSIC", "default", legacy, "2025-01-01", "2025-01-01"),
+                "UPDATE secrets SET value_enc = ? WHERE name_lookup = ?",
+                (legacy, lookup),
             )
             vm._require_conn().commit()
 
@@ -1152,7 +1110,8 @@ class TestRekey:
 
         with _VM(vault_db, PASSPHRASE) as vm:
             row = vm._require_conn().execute(
-                "SELECT value_enc FROM secrets WHERE name = 'CLASSIC'"
+                "SELECT value_enc FROM secrets WHERE name_lookup = ?",
+                (lookup,),
             ).fetchone()
             assert _ti(row["value_enc"]) == KDF_ITERATIONS_CURRENT
 

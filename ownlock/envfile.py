@@ -6,7 +6,7 @@ Entry points used by ``ownlock import`` and ``ownlock rewrite-env``:
   ``.env`` file. Skips comments, blank lines, lines without ``=``, and keys
   that fail :func:`ownlock.paths.is_valid_secret_name`.
 * :func:`classify_env_file` — decide whether a file should be treated as
-  ``"bootstrap"`` (already contains ``vault(...)`` references; we should
+  ``"vault_refs"`` (already contains ``vault(...)`` references; we should
   prompt for missing keys) or ``"seed"`` (plain ``KEY=VALUE``; we should
   add the values to the vault). Drives ``ownlock import``'s auto-routing.
 * :func:`import_env_file_into_vault` — pump KV pairs straight into a
@@ -34,11 +34,11 @@ _VAULT_CALL_HINT = re.compile(r"\bvault\s*\(")
 
 
 def classify_env_file(env_file: Path) -> str:
-    """Return ``"bootstrap"``, ``"seed"``, or ``"empty"``.
+    """Return ``"vault_refs"``, ``"seed"``, or ``"empty"``.
 
     Drives ``ownlock import``'s automatic routing:
 
-    * ``"bootstrap"`` — file has at least one ``vault(...)`` reference.
+    * ``"vault_refs"`` — file has at least one ``vault(...)`` reference.
       The file is what a teammate sees after cloning a repo that's already
       on ownlock; we should compute which references aren't in their vault
       yet and prompt only for those.
@@ -47,7 +47,7 @@ def classify_env_file(env_file: Path) -> str:
     * ``"empty"`` — neither shape applies; nothing useful to do.
 
     Mixed files (both vault refs *and* loose ``KEY=VALUE`` lines) classify
-    as ``"bootstrap"``: the vault references are the source of truth, and
+    as ``"vault_refs"``: the vault references are the source of truth, and
     any plain values are likely leftover or unrelated config that should be
     edited by hand rather than swept into the vault wholesale.
     """
@@ -56,7 +56,7 @@ def classify_env_file(env_file: Path) -> str:
     from ownlock.resolver import collect_vault_refs
 
     if collect_vault_refs(env_file):
-        return "bootstrap"
+        return "vault_refs"
     for _ in iter_env_kv_pairs(env_file):
         return "seed"
     return "empty"
@@ -141,9 +141,7 @@ def rewrite_env_lines_to_vault_syntax(
     return new_lines, changed
 
 
-# Default list of env files ``ownlock auto`` and ``ownlock bootstrap`` will
-# consider when no -f was given. Keeps the two commands looking at the same
-# set of files so user expectations match.
+# Default env files ``ownlock import`` considers when no path was given.
 DEFAULT_ENV_FILE_CANDIDATES: tuple[str, ...] = (
     ".env",
     ".env.local",

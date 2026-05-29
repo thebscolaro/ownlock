@@ -21,7 +21,7 @@ Schema (one JSON object per line, sorted keys for stable diffs):
     }
 
 Operations: ``init``, ``set``, ``delete``, ``import``, ``rekey``, ``share``,
-``import-share``, ``bootstrap``. The CLI calls :func:`record` at the
+``import-share``. The CLI calls :func:`record` at the
 boundary so all vault-state-changing commands flow through one place.
 Read-only commands (``get``, ``list``, ``run``, ``scan``, ``doctor``) and
 .env file rewrites that don't touch the vault (``rewrite-env``) are

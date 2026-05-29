@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PBKDF2 default raised from 200,000 to 600,000 iterations** (OWASP 2023 guidance for PBKDF2-SHA256). Existing vaults keep working; upgrade with `ownlock rekey --upgrade-kdf`.
 - **Versioned ciphertext format**: each stored value carries a small format prefix (v1 legacy, v2 with embedded iteration count) so a vault can hold a mix during a partial migration. `decrypt` auto-detects.
 - **Vault metadata**: new `meta` table records `schema_version`, `kdf_algo`, `kdf_iterations`, `created_at`. `ownlock doctor` reads it without needing the passphrase.
+- **Encrypted secret names (schema v3)**: secret names are no longer stored in cleartext in `vault.db`. Rows are keyed by an HMAC lookup id; names are AES-GCM ciphertext. Legacy v1/v2 vaults auto-migrate on first open with your passphrase.
 - **`.ownlock.bak` files are gone**: backups (env-rewrite and vault snapshots) live under `.ownlock/backups/` with mode `0600`. `.ownlock/` is gitignored by default. `ownlock scan` and `ownlock doctor` flag any leftover legacy `.ownlock.bak` files.
 - **Stdout redaction matches encoded variants**: a secret is now also redacted when it appears in the child's stdout/stderr as base64, URL-encoded, or JSON-string-escaped. Values shorter than 8 chars are skipped to keep redaction signal-to-noise high.
 - **WAL mode + 5s busy-timeout**: SQLite vaults now open in WAL mode, so two `ownlock` processes (e.g. an agent and a developer in another shell) can read and write the same vault file safely. `rekey`'s vault snapshot also captures the WAL/SHM sidecars so a hard-killed prior writer's pending bytes are restorable.
@@ -22,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ownlock rekey`** — re-encrypt the entire vault under a new passphrase (`--rotate-passphrase`) and/or a new KDF iteration count (`--upgrade-kdf`). Single SQL transaction; the live file is untouched until commit; a 0600 backup is left under `.ownlock/backups/`.
 - **`ownlock import` is now the single entry point** for getting secrets into the vault. Auto-detects the file shape and routes accordingly:
   - Plain `KEY=VALUE` → seed flow (with optional `--rewrite` to also rewrite the file in place to use `vault(...)`).
-  - Already on `vault(...)` references → bootstrap flow that prompts only for the keys missing from the local vault. Pair with `--values-from JSON` for non-interactive runs.
+  - Already on `vault(...)` references → vault_refs flow that prompts only for the keys missing from the local vault. Pair with `--values-from JSON` for non-interactive runs.
 - **`ownlock init` walks new users through onboarding**: when a `.env` is present in cwd, it offers to import secrets (and rewrite to vault references) on the spot — that's the entire flow for a teammate cloning the repo.
 - **`ownlock share` / `ownlock import-share`** — encrypted JSON bundles for handing real secret values to a teammate. Bundle is encrypted with a separate passphrase from the local vault, so the bundle file and the recipient's vault have independent access boundaries.
 - **`ownlock set --from-file PATH` / `--editor`** — multi-line / file-based secret entry (PEM keys, JSON service-account files, etc.). `--strip` controls trailing whitespace handling.
@@ -34,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`ownlock auto` and `ownlock bootstrap` are deprecated** in favor of `ownlock import` (with `--rewrite` for the auto case). They remain as hidden aliases that delegate to `import` and print a one-line deprecation hint; will be removed in a future release.
+- **Removed `ownlock auto` and `ownlock bootstrap`** (0.1 commands). Use `ownlock import` and `ownlock import --rewrite` instead.
 - **Refactor**: `cli.py` and `vault.py` split into smaller, focused modules — `paths.py`, `envfile.py`, `backups.py`, `scanner.py`, `doctor.py`, `audit.py`. Most commands now compose helpers from these modules instead of inlining the logic.
 
 ### Documentation
@@ -45,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### CI
 
 - **Test job split**: fast unit tests (`-m "not smoke"`) run on Linux 3.11 + 3.12, macOS 3.12, Windows 3.12. Subprocess smoke tests run as a separate single-OS job so a flaky smoke test can't block PR feedback.
+- **Coverage gate**: ubuntu / Python 3.12 runs `pytest-cov` with `fail_under=84` and uploads an HTML report artifact (`coverage-html`).
 
 ## [0.1.11] - 2026-04-27
 

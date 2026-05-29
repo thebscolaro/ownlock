@@ -54,7 +54,13 @@ from ownlock.scanner import (
     is_dangerous_scan_root as _is_dangerous_scan_root,
     scan_directory,
 )
-from ownlock.vault import VaultManager, GLOBAL_VAULT_PATH, PROJECT_VAULT_DIR, PROJECT_VAULT_DB
+from ownlock.vault import (
+    VaultManager,
+    GLOBAL_VAULT_PATH,
+    PROJECT_VAULT_DIR,
+    PROJECT_VAULT_DB,
+    SCHEMA_VERSION_CURRENT,
+)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -89,6 +95,18 @@ def _safe_command(fn: F) -> F:
             raise typer.Exit(1)
 
     return wrapper  # type: ignore[return-value]
+
+
+def _file_link(path: Path) -> str:
+    """Rich markup for a ``file://`` link (clickable in Cursor, VS Code, iTerm, etc.)."""
+    resolved = path.expanduser().resolve()
+    return f"[link={resolved.as_uri()}]{resolved}[/link]"
+
+
+def _print_env_rewrite_result(changed: int, env_file: Path, backup_path: Path) -> None:
+    """Human-readable rewrite summary: file link on one line, backup on the next."""
+    console.print(f"Rewrote [bold]{changed}[/bold] key(s) in {_file_link(env_file)}")
+    console.print(f"[dim]Backup saved to[/dim] {_file_link(backup_path)}")
 
 
 def _write_env_backup(env_file: Path, content: str) -> Path:
@@ -181,7 +199,7 @@ def _offer_import_after_init(vault_path: Path, passphrase: str) -> None:
     * stdin/stdout are TTYs (so we never block a non-interactive caller),
     * cwd contains at least one of :data:`DEFAULT_ENV_FILE_CANDIDATES`.
 
-    Dispatches to the same seed / bootstrap flows as ``ownlock import``,
+    Dispatches to the same seed / vault_refs flows as ``ownlock import``,
     which means a teammate cloning a repo whose ``.env`` already uses
     ``vault(...)`` references gets prompted for the missing values, while
     an author with a plaintext ``.env`` gets walked through seeding the
@@ -211,9 +229,9 @@ def _offer_import_after_init(vault_path: Path, passphrase: str) -> None:
         return
 
     selected = [_validate_env_file(p) for p in discovered]
-    has_vault_refs = any(classify_env_file(f) == "bootstrap" for f in selected)
+    has_vault_refs = any(classify_env_file(f) == "vault_refs" for f in selected)
     if has_vault_refs:
-        _import_bootstrap_flow(
+        _import_vault_refs_flow(
             selected, vault_path, passphrase, "default",
             yes=False, values_from=None, is_tty=True,
         )
@@ -620,11 +638,11 @@ def rekey(
         not do_rotate
         and current_iters == KDF_ITERATIONS_CURRENT
         and iter_summary == {KDF_ITERATIONS_CURRENT: secret_count}
-        and schema == 2
+        and schema >= SCHEMA_VERSION_CURRENT
     ):
         console.print(
-            f"[dim]Vault is already at schema v2, KDF {KDF_ITERATIONS_CURRENT:,}. "
-            "Nothing to upgrade.[/dim]"
+            f"[dim]Vault is already at schema v{SCHEMA_VERSION_CURRENT}, "
+            f"KDF {KDF_ITERATIONS_CURRENT:,}. Nothing to upgrade.[/dim]"
         )
         return
 
@@ -1156,7 +1174,9 @@ def _import_seed_flow(
             "mode": "seed",
         },
     )
-    console.print(f"[green]Imported {count} secret(s) into vault (env={env}).[/green]")
+    console.print(
+        f"[green]Imported {count} secret(s) into vault[/green] [dim](env={env})[/dim]"
+    )
 
     if not rewrite or count == 0:
         return
@@ -1177,13 +1197,10 @@ def _import_seed_flow(
 
     backup_path = _write_env_backup(rewrite_target, original_text)
     rewrite_target.write_text("\n".join(new_lines) + "\n")
-    console.print(
-        f"[green]Rewrote {changed} key(s) in {rewrite_target}. "
-        f"Backup saved to {backup_path}.[/green]"
-    )
+    _print_env_rewrite_result(changed, rewrite_target, backup_path)
 
 
-def _import_bootstrap_flow(
+def _import_vault_refs_flow(
     files: list[Path],
     vault_path: Path,
     passphrase: str,
@@ -1320,7 +1337,7 @@ def _import_bootstrap_flow(
             "sources": [str(f) for f in files],
             "secrets_set": len(supplied),
             "names": sorted({k for (k, _, _, _) in supplied}),
-            "mode": "bootstrap",
+            "mode": "vault_refs",
         },
     )
     console.print(f"[green]Stored {len(supplied)} secret(s).[/green]")
@@ -1356,7 +1373,7 @@ def import_env(
     values_from: Optional[Path] = typer.Option(
         None,
         "--values-from",
-        help="JSON object {KEY: VALUE} for non-interactive bootstrap "
+        help="JSON object {KEY: VALUE} for non-interactive vault-ref fill "
         "(when the env file already has vault(\"...\") references).",
     ),
 ) -> None:
@@ -1367,7 +1384,7 @@ def import_env(
     * Plain ``KEY=VALUE`` lines  → seed flow (adds them to the vault).
       Pass ``--rewrite`` to also rewrite the file to use ``vault(...)``
       references afterwards.
-    * Already contains ``vault(...)`` refs → bootstrap flow (prompts only
+    * Already contains ``vault(...)`` refs → vault_refs flow (prompts only
       for the keys missing from your vault). Use ``--values-from JSON``
       for non-interactive runs.
 
@@ -1382,7 +1399,7 @@ def import_env(
         )
         return
 
-    has_vault_refs = any(classify_env_file(f) == "bootstrap" for f in selected_files)
+    has_vault_refs = any(classify_env_file(f) == "vault_refs" for f in selected_files)
     is_tty = _is_tty()
 
     if has_vault_refs and rewrite:
@@ -1397,7 +1414,7 @@ def import_env(
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     if has_vault_refs:
-        _import_bootstrap_flow(
+        _import_vault_refs_flow(
             selected_files,
             vault_path,
             passphrase,
@@ -1773,67 +1790,6 @@ def import_share(
     )
 
 
-# Deprecated aliases. ``bootstrap`` and ``auto`` were separate commands in
-# 0.1; v0.2 collapses both into ``import``'s auto-routing. We keep the
-# top-level commands working (and registered with Typer so existing scripts
-# / docs / shell completions don't break) but drop them from --help by
-# leaving the docstring marked DEPRECATED — Typer still renders them, so
-# we additionally print a one-line nudge to stderr the first time.
-
-
-@app.command("bootstrap", hidden=True)
-@_safe_command
-def bootstrap(
-    env_files: Optional[list[Path]] = typer.Option(None, "-f", "--file"),
-    env: str = typer.Option("default", "--env", "-e"),
-    global_vault: bool = typer.Option(False, "--global"),
-    project: bool = typer.Option(False, "--project"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
-    values_from: Optional[Path] = typer.Option(None, "--values-from"),
-) -> None:
-    """[deprecated] Use ``ownlock import`` — it auto-detects vault() references."""
-    console.print(
-        "[yellow]'ownlock bootstrap' is deprecated; use "
-        "[bold]ownlock import[/bold] (auto-detects vault() references).[/yellow]"
-    )
-    return import_env(
-        env_file=None,
-        files=env_files,
-        env=env,
-        global_vault=global_vault,
-        project=project,
-        yes=yes,
-        rewrite=False,
-        values_from=values_from,
-    )
-
-
-@app.command("auto", hidden=True)
-@_safe_command
-def auto(
-    files: Optional[list[Path]] = typer.Option(None, "-f", "--file"),
-    env: str = typer.Option("default", "--env", "-e"),
-    global_vault: bool = typer.Option(False, "--global"),
-    project: bool = typer.Option(False, "--project"),
-    yes: bool = typer.Option(False, "--yes", "-y"),
-) -> None:
-    """[deprecated] Use ``ownlock import --rewrite``."""
-    console.print(
-        "[yellow]'ownlock auto' is deprecated; use "
-        "[bold]ownlock import --rewrite[/bold].[/yellow]"
-    )
-    return import_env(
-        env_file=None,
-        files=files,
-        env=env,
-        global_vault=global_vault,
-        project=project,
-        yes=yes,
-        rewrite=True,
-        values_from=None,
-    )
-
-
 @app.command("rewrite-env")
 @_safe_command
 def rewrite_env(
@@ -1873,7 +1829,7 @@ def rewrite_env(
 
     backup_path = _write_env_backup(env_file, original_text)
     env_file.write_text("\n".join(new_lines) + "\n")
-    console.print(f"[green]Rewrote {changed} key(s) in {env_file}. Backup saved to {backup_path}.[/green]")
+    _print_env_rewrite_result(changed, env_file, backup_path)
 
 
 @app.command()

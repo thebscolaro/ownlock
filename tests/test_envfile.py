@@ -27,30 +27,30 @@ class TestClassifyEnvFile:
         p.write_text("FOO=bar\nDB_PASS=hunter2longer\n")
         assert classify_env_file(p) == "seed"
 
-    def test_vault_ref_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+    def test_vault_ref_classifies_as_vault_refs(self, tmp_path: Path) -> None:
         p = tmp_path / ".env"
         p.write_text('FOO=vault("FOO")\n')
-        assert classify_env_file(p) == "bootstrap"
+        assert classify_env_file(p) == "vault_refs"
 
-    def test_mixed_file_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+    def test_mixed_file_classifies_as_vault_refs(self, tmp_path: Path) -> None:
         """Vault refs win when both shapes are present (teammate-clone case)."""
         p = tmp_path / ".env"
         p.write_text('FOO=vault("FOO")\nLEFTOVER=plain-value\n')
-        assert classify_env_file(p) == "bootstrap"
+        assert classify_env_file(p) == "vault_refs"
 
-    def test_vault_with_kwargs_still_classifies_as_bootstrap(self, tmp_path: Path) -> None:
+    def test_vault_with_kwargs_still_classifies_as_vault_refs(self, tmp_path: Path) -> None:
         p = tmp_path / ".env"
         p.write_text('PROD_KEY=vault("PROD_KEY", env="production")\n')
-        assert classify_env_file(p) == "bootstrap"
+        assert classify_env_file(p) == "vault_refs"
 
     def test_word_vault_in_value_is_not_a_vault_call(self, tmp_path: Path) -> None:
-        """Bare ``vault`` words shouldn't trigger bootstrap routing."""
+        """Bare ``vault`` words shouldn't trigger vault_refs routing."""
         p = tmp_path / ".env"
         p.write_text("HASHICORP_VAULT_TOKEN=hvs.abcdefghij\n")
         assert classify_env_file(p) == "seed"
 
-    def test_comment_with_vault_example_does_not_trigger_bootstrap(self, tmp_path: Path) -> None:
-        """A commented-out vault() example must not flip routing to bootstrap."""
+    def test_comment_with_vault_example_does_not_trigger_vault_refs(self, tmp_path: Path) -> None:
+        """A commented-out vault() example must not flip routing to vault_refs."""
         p = tmp_path / ".env"
         p.write_text(
             "# TOKEN=vault(\"TOKEN\")\n"
