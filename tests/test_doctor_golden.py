@@ -12,7 +12,7 @@ from ownlock.cli import app
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 _GOLDEN = Path(__file__).parent / "golden" / "doctor_output_shape.json"
 

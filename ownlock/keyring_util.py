@@ -100,13 +100,9 @@ def resolve_passphrase(
     """
     import os
 
-    ownlock_env = os.environ.get("OWNLOCK_PASSPHRASE")
-    value = ownlock_env or env_var
+    value = os.environ.get("OWNLOCK_PASSPHRASE") or env_var
     if value:
-        pp = _passphrase_from_str(value)
-        if ownlock_env is not None:
-            os.environ.pop("OWNLOCK_PASSPHRASE", None)
-        return pp
+        return _passphrase_from_str(value)
 
     stored = get_passphrase()
     if stored:
@@ -130,11 +126,14 @@ def passphrase_session(
     prompt: bool = True,
 ) -> Iterator[Passphrase]:
     """Resolve the vault passphrase and zero the buffer when the scope exits."""
+    import os
+
     pp = resolve_passphrase(env_var, prompt=prompt)
     try:
         yield pp
     finally:
         pp.clear()
+        os.environ.pop("OWNLOCK_PASSPHRASE", None)
         gc.collect()
 
 

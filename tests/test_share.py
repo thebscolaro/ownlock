@@ -13,7 +13,7 @@ from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
 BUNDLE_PP = "bundle-passphrase-y"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 
 @pytest.fixture()

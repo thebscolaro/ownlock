@@ -12,7 +12,7 @@ from ownlock.cli import app
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +168,9 @@ class TestScanCliNoVault:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "safe.txt").write_text("hello\n")
 
-        result = runner.invoke(app, ["scan", ".", "--yes"])
+        result = runner.invoke(
+            app, ["scan", ".", "--yes"], env={"OWNLOCK_PASSPHRASE": None}
+        )
         assert result.exit_code == 0, result.output
         assert "No project vault found" in result.output
         assert "Invalid passphrase" not in result.output

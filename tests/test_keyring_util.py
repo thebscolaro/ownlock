@@ -87,11 +87,12 @@ class TestResolvePassphrase:
         pp = keyring_util.resolve_passphrase(prompt=False)
         assert _passphrase_text(pp) == "from-env"
 
-    def test_env_var_removed_from_process_after_resolve(
+    def test_env_var_removed_from_process_after_session(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("OWNLOCK_PASSPHRASE", "from-env")
-        keyring_util.resolve_passphrase(prompt=False)
+        with passphrase_session(prompt=False):
+            pass
         assert "OWNLOCK_PASSPHRASE" not in __import__("os").environ
 
     def test_env_var_arg_does_not_unset_ownlock_env(

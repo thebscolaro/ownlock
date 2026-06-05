@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Shorter in-process passphrase lifetime** — vault sessions hold the passphrase in wipeable memory; CLI commands zero the session buffer when the command finishes. After resolving from `OWNLOCK_PASSPHRASE`, the variable is removed from the process environment.
+- **Shorter in-process passphrase lifetime** — vault sessions hold the passphrase in wipeable memory; CLI commands zero the session buffer and remove `OWNLOCK_PASSPHRASE` from the process environment when the command finishes.
 - **Parameterized SQL throughout `VaultManager`** — regression tests for metacharacters in secret names and envs.
 
 ### Changed

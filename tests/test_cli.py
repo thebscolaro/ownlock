@@ -14,7 +14,7 @@ from ownlock.passphrase import Passphrase
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 
 @pytest.fixture(autouse=True)
@@ -412,7 +412,9 @@ class TestDoctor:
         monkeypatch.setattr(
             "ownlock.keyring_util.get_passphrase", lambda: "stored-pp"
         )
-        result = runner.invoke(app, ["doctor"])
+        result = runner.invoke(
+            app, ["doctor"], env={"OWNLOCK_PASSPHRASE": None}
+        )
         assert result.exit_code == 0
         assert "keyring" in result.output
 
@@ -830,7 +832,11 @@ class TestScan:
         )
         (tmp_path / "readme.txt").write_text("nothing\n")
 
-        result = runner.invoke(app, ["scan", str(tmp_path), "--yes"])
+        result = runner.invoke(
+            app,
+            ["scan", str(tmp_path), "--yes"],
+            env={"OWNLOCK_PASSPHRASE": None},
+        )
         assert result.exit_code == 0, result.output
         assert "No project vault found" in result.output
         assert "Invalid passphrase" not in result.output
@@ -849,11 +855,15 @@ class TestScan:
         legacy = tmp_path / ".env.ownlock.bak"
         legacy.write_text("OLD=1\n")
 
-        result = runner.invoke(app, ["scan", str(tmp_path), "--yes"])
+        result = runner.invoke(
+            app,
+            ["scan", str(tmp_path), "--yes"],
+            env={"OWNLOCK_PASSPHRASE": "wrong-pass"},
+        )
         assert result.exit_code == 1, result.output
         assert "Passphrase does not unlock vault" in result.output
         assert "legacy plaintext backup" in result.output.lower()
-        assert legacy.name in result.output
+        assert legacy.name in result.output.replace("\n", "")
 
 # Note: --max-file-bytes / unit-level rewrite logic are covered by
 # tests/test_scanner.py::test_max_file_bytes_skips_oversized and
@@ -1203,7 +1213,9 @@ class TestErrorHandling:
             "ownlock.cli.getpass.getpass",
             lambda prompt="": "",
         )
-        result = runner.invoke(app, ["list"])
+        result = runner.invoke(
+            app, ["list"], env={"OWNLOCK_PASSPHRASE": None}
+        )
         assert result.exit_code == 1
         assert "No vault passphrase found" in result.output
         assert "Traceback" not in result.output

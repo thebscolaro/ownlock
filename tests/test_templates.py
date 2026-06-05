@@ -31,7 +31,7 @@ from ownlock.templates import (
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 
 # --- Fixtures --------------------------------------------------------------
