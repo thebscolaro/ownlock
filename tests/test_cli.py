@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ownlock.cli import _resolve_vault_path as _real_resolve_vault_path, app
+from ownlock.passphrase import Passphrase
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "test-pass"
@@ -28,6 +29,10 @@ def _ownlock_env(tmp_path, monkeypatch):
     # Make _resolve_vault_path always return our tmp vault
     monkeypatch.setattr(
         "ownlock.cli._resolve_vault_path",
+        lambda global_vault=False, project=False: vault_path,
+    )
+    monkeypatch.setattr(
+        "ownlock.cli._resolve_scan_vault_path",
         lambda global_vault=False, project=False: vault_path,
     )
 
@@ -809,6 +814,47 @@ class TestScan:
         assert result.exit_code == 1
         assert "cancelled" in result.output.lower()
 
+    def test_scan_no_project_vault_does_not_use_global(
+        self, tmp_path, monkeypatch
+    ):
+        """Without a project vault, scan must not open the global vault."""
+        monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
+        monkeypatch.setattr("ownlock.keyring_util.get_passphrase", lambda: None)
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_scan_vault_path",
+            lambda global_vault=False, project=False: None,
+        )
+        monkeypatch.setattr(
+            "ownlock.vault.VaultManager.find_project_vault",
+            staticmethod(lambda: None),
+        )
+        (tmp_path / "readme.txt").write_text("nothing\n")
+
+        result = runner.invoke(app, ["scan", str(tmp_path), "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "No project vault found" in result.output
+        assert "Invalid passphrase" not in result.output
+
+    def test_scan_wrong_passphrase_continues_legacy_scan(
+        self, tmp_path, vault_db, monkeypatch
+    ):
+        """Bad passphrase prints a clear message but still flags legacy backups."""
+        with VaultManager(vault_db, "correct-pass") as vm:
+            vm.set("K", "long-secret-value-here")
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", "wrong-pass")
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_scan_vault_path",
+            lambda global_vault=False, project=False: vault_db,
+        )
+        legacy = tmp_path / ".env.ownlock.bak"
+        legacy.write_text("OLD=1\n")
+
+        result = runner.invoke(app, ["scan", str(tmp_path), "--yes"])
+        assert result.exit_code == 1, result.output
+        assert "Passphrase does not unlock vault" in result.output
+        assert "legacy plaintext backup" in result.output.lower()
+        assert legacy.name in result.output
+
 # Note: --max-file-bytes / unit-level rewrite logic are covered by
 # tests/test_scanner.py::test_max_file_bytes_skips_oversized and
 # tests/test_envfile.py::test_rewrite_env_lines_to_vault_syntax.
@@ -1126,6 +1172,23 @@ class TestRekey:
                 (lookup,),
             ).fetchone()
             assert _ti(row["value_enc"]) == KDF_ITERATIONS_CURRENT
+
+
+class TestPassphraseSession:
+    def test_list_command_clears_session_passphrase(self, vault_db, monkeypatch):
+        """CLI commands zero the resolve_passphrase buffer when they finish."""
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        cleared_ids: list[int] = []
+        original_clear = Passphrase.clear
+
+        def tracking_clear(self: Passphrase) -> None:
+            cleared_ids.append(id(self))
+            original_clear(self)
+
+        monkeypatch.setattr(Passphrase, "clear", tracking_clear)
+        result = runner.invoke(app, ["list", "--json"])
+        assert result.exit_code == 0
+        assert len(cleared_ids) >= 2  # VaultManager + passphrase_session
 
 
 class TestErrorHandling:

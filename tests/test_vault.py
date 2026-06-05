@@ -1,6 +1,7 @@
 """Tests for ownlock.vault — SQLite-backed encrypted secret storage."""
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,26 @@ from ownlock.vault import (
 
 
 PASSPHRASE = "test-pass"
+
+
+class _ConnExecuteProxy:
+    """Delegate to a real sqlite3 connection but override ``execute``."""
+
+    def __init__(self, conn: sqlite3.Connection, handler) -> None:
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_handler", handler)
+
+    def execute(self, sql, parameters=(), /, *args, **kwargs):
+        return self._handler(self._conn, sql, parameters, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in ("_conn", "_handler"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
 
 
 @pytest.fixture()
@@ -349,3 +370,217 @@ class TestConcurrencyPragmas:
         with VaultManager(db, PASSPHRASE) as vm:
             vm.set("K", "v")
         assert db.stat().st_mode & 0o777 == 0o600
+
+
+class TestSqlInjectionResistance:
+    """Secret names and envs are bound as parameters, never interpolated into SQL."""
+
+    PAYLOADS = [
+        "'; DROP TABLE secrets; --",
+        "1 OR 1=1",
+        "name' UNION SELECT value_enc FROM secrets --",
+        '"; DELETE FROM secrets; --',
+        "x\0y",
+    ]
+
+    def test_set_get_delete_with_sql_metacharacters_in_name(self, tmp_path):
+        db = tmp_path / "inj.db"
+        for payload in self.PAYLOADS:
+            with VaultManager(db, PASSPHRASE) as vm:
+                vm.set(payload, "secret-value")
+                assert vm.get(payload) == "secret-value"
+                assert vm.delete(payload) is True
+                assert vm.get(payload) is None
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("still_here", "ok")
+            assert vm.get("still_here") == "ok"
+
+    def test_list_and_get_all_with_sql_metacharacters_in_env(self, tmp_path):
+        db = tmp_path / "env_inj.db"
+        evil_env = "prod'; DROP TABLE secrets; --"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("KEY", "v", env=evil_env)
+            assert vm.get("KEY", env=evil_env) == "v"
+            assert len(vm.list_secrets(env=evil_env)) == 1
+            assert vm.get_all_decrypted(env=evil_env) == {"KEY": "v"}
+
+
+class TestVaultEdgeCases:
+    def test_require_conn_before_open_raises(self, tmp_path):
+        vm = VaultManager(tmp_path / "closed.db", PASSPHRASE)
+        with pytest.raises(RuntimeError, match="not open"):
+            vm.get("K")
+
+    def test_secret_iterations_summary_skips_corrupt_tokens(self, tmp_path):
+        db = tmp_path / "corrupt.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("OK", "v")
+            vm._require_conn().execute(
+                "UPDATE secrets SET value_enc = ?",
+                ("not-a-valid-token",),
+            )
+            vm._require_conn().commit()
+            assert vm.secret_iterations_summary() == {}
+
+    def test_recreates_secrets_table_with_unexpected_shape(self, tmp_path):
+        """Pre-v3 file with a broken ``secrets`` table is rebuilt on open."""
+        db = tmp_path / "weird.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE secrets (foo TEXT NOT NULL)")
+        conn.commit()
+        conn.close()
+
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("A", "1")
+            assert vm.get("A") == "1"
+            assert "name_lookup" in vm._secrets_columns()
+
+
+class TestPassphraseMemory:
+    def test_close_clears_passphrase_buffer(self, tmp_path):
+        db = tmp_path / "wipe.db"
+        vm = VaultManager(db, PASSPHRASE)
+        vm.open()
+        vm.set("K", "v")
+        vm.close()
+        assert not vm._passphrase
+
+    def test_context_manager_clears_passphrase(self, tmp_path):
+        db = tmp_path / "ctx_wipe.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("K", "v")
+            assert bytes(vm._passphrase.material()) == PASSPHRASE.encode()
+        assert not vm._passphrase
+
+
+class TestDefensivePaths:
+    def test_db_path_property(self, tmp_path):
+        db = tmp_path / "prop.db"
+        vm = VaultManager(db, PASSPHRASE)
+        assert vm.db_path == db
+
+    def test_apply_concurrency_pragmas_without_open_conn(self, tmp_path):
+        vm = VaultManager(tmp_path / "pragma.db", PASSPHRASE)
+        vm._apply_concurrency_pragmas()
+
+    def test_open_continues_when_chmod_raises(self, tmp_path, monkeypatch):
+        import os
+
+        db = tmp_path / "chmod.db"
+        monkeypatch.setattr(os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError(1, "chmod")))
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("K", "v")
+            assert vm.get("K") == "v"
+
+    def test_close_ignores_wal_checkpoint_failure(self, tmp_path, monkeypatch):
+        db = tmp_path / "ckpt_fail.db"
+        real_connect = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+
+            def execute(inner, sql, parameters=(), /, *a, **k):
+                if isinstance(sql, str) and "wal_checkpoint" in sql:
+                    raise sqlite3.DatabaseError("busy")
+                return inner.execute(sql, parameters, *a, **k)
+
+            return _ConnExecuteProxy(conn, execute)
+
+        monkeypatch.setattr(sqlite3, "connect", connect)
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("K", "v")
+        with VaultManager(db, PASSPHRASE) as vm2:
+            assert vm2.get("K") == "v"
+
+    def test_rekey_rolls_back_when_update_fails(self, tmp_path, monkeypatch):
+        db = tmp_path / "rekey_rb.db"
+        real_connect = sqlite3.connect
+        update_calls = 0
+
+        def connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+
+            def execute(inner, sql, parameters=(), /, *a, **k):
+                nonlocal update_calls
+                if isinstance(sql, str) and "UPDATE secrets" in sql:
+                    update_calls += 1
+                    if update_calls >= 2:
+                        raise RuntimeError("simulated update failure")
+                return inner.execute(sql, parameters, *a, **k)
+
+            return _ConnExecuteProxy(conn, execute)
+
+        monkeypatch.setattr(sqlite3, "connect", connect)
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("A", "1")
+            vm.set("B", "2")
+            with pytest.raises(RuntimeError, match="simulated"):
+                vm.rekey("new-passphrase")
+            assert vm.get("A") == "1"
+            assert vm.get("B") == "2"
+            assert bytes(vm._passphrase.material()) == PASSPHRASE.encode()
+
+
+class TestFindProjectVault:
+    def test_does_not_treat_global_vault_as_project(self, tmp_path, monkeypatch):
+        """Walking up to $HOME must not return ~/.ownlock/vault.db as a project vault."""
+        from ownlock import vault as vault_module
+
+        global_vault = tmp_path / "home" / ".ownlock" / "vault.db"
+        global_vault.parent.mkdir(parents=True)
+        VaultManager.init_vault(global_vault, PASSPHRASE).close()
+        monkeypatch.setattr(vault_module, "GLOBAL_VAULT_PATH", global_vault)
+
+        repo = tmp_path / "code" / "myapp"
+        repo.mkdir(parents=True)
+        monkeypatch.chdir(repo)
+
+        assert VaultManager.find_project_vault() is None
+
+    def test_finds_real_project_vault_above_cwd(self, tmp_path, monkeypatch):
+        project_vault = tmp_path / "repo" / ".ownlock" / "vault.db"
+        VaultManager.init_vault(project_vault, PASSPHRASE).close()
+        subdir = tmp_path / "repo" / "pkg" / "inner"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        assert VaultManager.find_project_vault() == project_vault
+
+    def test_global_resolve_oserror_uses_unresolved_path(self, tmp_path, monkeypatch):
+        from ownlock import vault as vault_module
+
+        global_vault = tmp_path / "home" / ".ownlock" / "vault.db"
+        global_vault.parent.mkdir(parents=True)
+        VaultManager.init_vault(global_vault, PASSPHRASE).close()
+        monkeypatch.setattr(vault_module, "GLOBAL_VAULT_PATH", global_vault)
+
+        project_vault = tmp_path / "repo" / ".ownlock" / "vault.db"
+        VaultManager.init_vault(project_vault, PASSPHRASE).close()
+        subdir = tmp_path / "repo" / "pkg"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        real_resolve = Path.resolve
+
+        def resolve(self):
+            if self == global_vault:
+                raise OSError("resolve failed")
+            return real_resolve(self)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        assert VaultManager.find_project_vault() == project_vault
+
+    def test_skips_global_candidate_when_resolve_raises(self, tmp_path, monkeypatch):
+        from ownlock import vault as vault_module
+
+        global_vault = tmp_path / "home" / ".ownlock" / "vault.db"
+        global_vault.parent.mkdir(parents=True)
+        VaultManager.init_vault(global_vault, PASSPHRASE).close()
+        monkeypatch.setattr(vault_module, "GLOBAL_VAULT_PATH", global_vault)
+
+        work = tmp_path / "home" / "myapp"
+        work.mkdir(parents=True)
+        monkeypatch.chdir(work)
+
+        monkeypatch.setattr(Path, "resolve", lambda self: (_ for _ in ()).throw(OSError(1)))
+        assert VaultManager.find_project_vault() is None

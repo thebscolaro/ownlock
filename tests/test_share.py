@@ -45,6 +45,28 @@ class TestBundleAPI:
         result = import_bundle(bundle, BUNDLE_PP)
         assert result == secrets
 
+    def test_bundle_missing_secrets_list_raises(self):
+        import base64
+        import json
+
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        from ownlock.crypto import derive_key
+
+        good = export_bundle(
+            [{"name": "A", "env": "default", "value": "v"}],
+            BUNDLE_PP,
+        )
+        bundle = json.loads(good)
+        salt = base64.b64decode(bundle["kdf_salt"])
+        nonce = base64.b64decode(bundle["nonce"])
+        iterations = int(bundle["kdf_iterations"])
+        key = derive_key(BUNDLE_PP, salt, iterations)
+        ct = AESGCM(key).encrypt(nonce, json.dumps({"wrong": []}).encode(), None)
+        bundle["ciphertext"] = base64.b64encode(ct).decode()
+        with pytest.raises(ValueError, match="missing 'secrets' list"):
+            import_bundle(json.dumps(bundle), BUNDLE_PP)
+
     def test_wrong_passphrase_raises(self):
         from cryptography.exceptions import InvalidTag
 

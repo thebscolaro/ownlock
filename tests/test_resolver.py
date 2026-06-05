@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
-from ownlock.resolver import resolve_env_file
+from ownlock.passphrase import Passphrase
+from ownlock.resolver import VaultLookup, resolve_env_file
 from ownlock.vault import VaultManager
 
 
@@ -28,6 +29,39 @@ def project_vault(tmp_path):
     vm = VaultManager.init_vault(db, PASSPHRASE)
     yield vm, db
     vm.close()
+
+
+class TestCollectVaultRefs:
+    def test_missing_env_file_returns_empty(self, tmp_path: Path) -> None:
+        from ownlock.resolver import collect_vault_refs
+
+        assert collect_vault_refs(tmp_path / "missing.env") == []
+
+    def test_skips_lines_without_equals(self, tmp_path: Path) -> None:
+        from ownlock.resolver import collect_vault_refs
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("noequals\nKEY=vault(\"A\")\n")
+        refs = collect_vault_refs(env_file)
+        assert len(refs) == 1
+        assert refs[0]["key"] == "A"
+
+
+class TestResolveEnvFileEdgeCases:
+    def test_skips_lines_without_equals(self, tmp_path: Path, global_vault) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text("broken-line\nPLAIN=ok\n")
+        resolved, _ = resolve_env_file(env_file, PASSPHRASE)
+        assert resolved == {"PLAIN": "ok"}
+
+
+class TestVaultLookupPassphrase:
+    def test_close_clears_internal_passphrase_buffer(self) -> None:
+        pp = Passphrase.from_str(PASSPHRASE)
+        lookup = VaultLookup(pp)
+        lookup.close()
+        assert bytes(pp.material()) == PASSPHRASE.encode()
+        assert not lookup._passphrase
 
 
 class TestPlainEnv:

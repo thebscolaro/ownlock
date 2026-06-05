@@ -5,6 +5,31 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-03
+
+### Fixed
+
+- **`find_project_vault` no longer treats `~/.ownlock/vault.db` as a project vault** when walking up from `$HOME` or a subdirectory.
+- **`ownlock scan` uses the project vault by default** (`--global` for the global vault). When no project vault exists or the passphrase does not unlock it, scan still flags legacy backup files instead of failing silently.
+
+### Added
+
+- **Multi-file positional `ownlock import`** — `ownlock import a.env b.env` imports several files in one command.
+- **[UPGRADE.md](UPGRADE.md)** — migration guide for 0.1.x → 0.2.x.
+
+### Security
+
+- **Shorter in-process passphrase lifetime** — vault sessions hold the passphrase in wipeable memory; CLI commands zero the session buffer when the command finishes. After resolving from `OWNLOCK_PASSPHRASE`, the variable is removed from the process environment.
+- **Parameterized SQL throughout `VaultManager`** — regression tests for metacharacters in secret names and envs.
+
+### Changed
+
+- **Documentation trimmed** to outcome-focused security language (no implementation-level escape or redaction detail in user-facing docs).
+
+### Tests
+
+- Vault defensive-path coverage (WAL checkpoint failure, `rekey` rollback, `find_project_vault` edge cases); `vault.py` at 100% line coverage.
+
 ## [0.2.0] - 2026-05-28
 
 ### Security
@@ -15,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Vault metadata**: new `meta` table records `schema_version`, `kdf_algo`, `kdf_iterations`, `created_at`. `ownlock doctor` reads it without needing the passphrase.
 - **Encrypted secret names (schema v3)**: secret names are no longer stored in cleartext in `vault.db`. Rows are keyed by an HMAC lookup id; names are AES-GCM ciphertext. Legacy v1/v2 vaults auto-migrate on first open with your passphrase.
 - **`.ownlock.bak` files are gone**: backups (env-rewrite and vault snapshots) live under `.ownlock/backups/` with mode `0600`. `.ownlock/` is gitignored by default. `ownlock scan` and `ownlock doctor` flag any leftover legacy `.ownlock.bak` files.
-- **Stdout redaction matches encoded variants**: a secret is now also redacted when it appears in the child's stdout/stderr as base64, URL-encoded, or JSON-string-escaped. Values shorter than 8 chars are skipped to keep redaction signal-to-noise high.
+- **Improved stdout/stderr redaction in `ownlock run`** — broader coverage of common leak patterns; very short values are skipped to limit false positives.
 - **WAL mode + 5s busy-timeout**: SQLite vaults now open in WAL mode, so two `ownlock` processes (e.g. an agent and a developer in another shell) can read and write the same vault file safely. `rekey`'s vault snapshot also captures the WAL/SHM sidecars so a hard-killed prior writer's pending bytes are restorable.
 
 ### Added
@@ -42,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **[UPGRADE.md](UPGRADE.md)** — step-by-step guide for 0.1.x → 0.2.0 (command renames, vault/KDF migration, how to exercise interactive `import` pickers).
 - **[README.md](README.md)** — new "ownlock + your AI coding assistant" section explaining why `ownlock run` works inside agentic sandboxes (Cursor background agents, Codex, Claude Code) where regular shell exports don't cross the sandbox boundary; new sections for "Get secrets into the vault" (unified `import`), "Onboarding a teammate" (placeholders vs. encrypted-bundle handoff), "Upgrading a vault" (`rekey`), and "Pairs with your CI / cloud secrets manager" (boundary with Harness / Doppler / GH Secrets / etc.). Crypto details moved to SECURITY.md.
 - **[SECURITY.md](SECURITY.md)** — now the authoritative source for cryptographic details: AES-256-GCM, PBKDF2-HMAC-SHA256 iteration history (200k → 600k), versioned ciphertext format, vault meta table, `run` passphrase isolation, encrypted-bundle mechanics, WAL mode + concurrency.
 
@@ -62,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`ownlock render`**: materialize config files from `<name>.template.<ext>` templates containing `{{vault("key")}}` references. Intended for apps whose configuration is read as files on disk rather than environment variables (classic ASP.NET `web.config`, `appsettings.*.json`, kubeconfig, etc.). Supports `--dry-run`, `--out`, `--env`, `--force`, and `--raw`. Writes atomically and applies mode `0600` on POSIX; refuses to overwrite a destination not covered by `.gitignore` without `--force`.
 - **`ownlock run --render PATH`** (repeatable) / **`--render-cleanup`** / **`--raw`**: render listed templates before launching the command, optionally unlinking them after the child exits. `run --render` intentionally requires **explicit paths** (no auto-discovery) to avoid rendering untrusted templates that happen to live under the cwd.
-- **Format-aware escaping**: vault values are escaped for the output file's string-literal syntax, chosen from the destination extension — JSON (`.json` `.jsonc` `.toml` `.yaml` `.yml` `.tf` `.tfvars`), XML (`.xml` `.config` `.xaml` `.csproj` `.resx`), INI / Java properties (`.ini` `.cfg` `.properties`), dotenv (`.env` `.envrc`), POSIX shell single-quote (`.sh` `.bash` `.zsh`), and raw (everything else). A secret containing `"`, `\`, a newline, or XML specials now produces a syntactically valid output file instead of a broken one. Per-reference overrides are available via `{{vault("name", format="json")}}`; `--raw` disables escaping globally.
+- **Render produces syntactically valid output files** — vault values are inserted so common config formats stay well-formed. Per-reference `format="..."` overrides and `--raw` are available when you handle quoting yourself.
 - **Full gitignore semantics via `git check-ignore`**: when git is on `PATH` and the destination is inside a git repo, ownlock's "refuses to overwrite non-ignored file" check now uses `git check-ignore`, which honors negation (`!pattern`), anchored patterns, nested `.gitignore`, `.git/info/exclude`, and the global excludes file. Falls back to the fnmatch best-effort scan when git is unavailable.
 - **Shared vault lookup**: new `VaultLookup` helper in `ownlock.resolver` encapsulates project/global vault selection for the `.env` resolver and the new template renderer; inline `project=true` / `global=true` semantics are identical across both surfaces.
 
@@ -71,13 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`render --out` path validation**: relative destinations outside cwd (`--out ../../elsewhere`) are rejected, matching the validation applied to `--file` / template paths.
 - **Template discovery does not follow symlinks**: switched `discover_templates` from `Path.rglob` to `os.walk(..., followlinks=False)`; symlinked files are also skipped. Prevents symlink-based escape from the project tree and rglob cycles.
 - **Malformed reference warning**: `render` now warns when `{{vault(...` fragments remain in the rendered output (typically from wrong quote style or missing closing brace), so a typo can't silently ship.
-- **Format-aware substitution (see above)**: supersedes the earlier "vault values are inserted verbatim" caveat — a secret can no longer silently break a JSON/XML output file or inject structure unless the user opts into `--raw` / `format="raw"`.
+- **Render output validity (see above)**: supersedes the earlier "vault values are inserted verbatim" caveat unless the user opts into `--raw` / `format="raw"`.
 - **Documented `--force` + `--render-cleanup` data-loss edge**: combining the two can unlink a pre-existing file the render overwrote.
 
 ### Documentation
 
-- **[README.md](README.md)**: new "Templates (for apps that can't read env vars)" section with the `web.config` + `configSource` walkthrough, a "Format-aware escaping" subsection with the extension-to-format table, and a "What about non-secret per-env config?" subsection pointing users at native mechanisms (ASP.NET transforms, `appsettings.{Environment}.json`, Terraform workspaces, etc.) for values that vary per env but aren't secret.
-- **[SECURITY.md](SECURITY.md)**: note on rendered-file hazards, atomic write, 0600 permissions, `git check-ignore`-backed gitignore detection (with fnmatch fallback), symlink-follow protection, format-aware escaping behavior, `--raw` / `format="raw"` caveats, `.ownlock-tmp` leftover behavior.
+- **[README.md](README.md)**: new "Templates (for apps that can't read env vars)" section with the `web.config` + `configSource` walkthrough, and a "What about non-secret per-env config?" subsection pointing users at native mechanisms (ASP.NET transforms, `appsettings.{Environment}.json`, Terraform workspaces, etc.) for values that vary per env but aren't secret.
+- **[SECURITY.md](SECURITY.md)**: note on rendered-file hazards, atomic write, 0600 permissions, `git check-ignore`-backed gitignore detection (with fnmatch fallback), symlink-follow protection, render output validity, `--raw` / `format="raw"` caveats, `.ownlock-tmp` leftover behavior.
 
 ## [0.1.9] - 2026-04-03
 

@@ -24,13 +24,17 @@ def test_passphrase_source_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_passphrase_source_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
-    monkeypatch.setattr("ownlock.keyring_util.get_passphrase", lambda: "stored")
+    monkeypatch.setattr(
+        "ownlock.keyring_util.keyring_has_passphrase", lambda: True
+    )
     assert passphrase_source() == "keyring"
 
 
 def test_passphrase_source_would_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OWNLOCK_PASSPHRASE", raising=False)
-    monkeypatch.setattr("ownlock.keyring_util.get_passphrase", lambda: None)
+    monkeypatch.setattr(
+        "ownlock.keyring_util.keyring_has_passphrase", lambda: False
+    )
     assert passphrase_source() == "would prompt"
 
 

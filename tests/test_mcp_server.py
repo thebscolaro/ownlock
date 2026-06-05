@@ -217,6 +217,12 @@ def test_ownlock_status_tolerates_bad_subprocess_json(mock_run: MagicMock) -> No
     assert out["schema_version"] is None
 
 
+def test_ownlock_main_invokes_mcp_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    with patch.object(mcp_server.mcp, "run") as mock_run:
+        mcp_server.main()
+        mock_run.assert_called_once()
+
+
 def test_ownlock_doctor_does_not_decrypt() -> None:
     """Sanity check: ``ownlock_doctor`` only ever invokes the CLI subprocess."""
     with patch.object(mcp_server, "_run_ownlock") as mock:

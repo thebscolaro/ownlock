@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import base64
 import os
+from typing import Union
+
+PassphraseMaterial = Union[str, bytes, bytearray]
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -49,7 +52,19 @@ KDF_ITERATIONS = KDF_ITERATIONS_CURRENT
 _V2_PREFIX = b"v2"
 
 
-def derive_key(passphrase: str, salt: bytes, iterations: int = KDF_ITERATIONS_CURRENT) -> bytes:
+def _passphrase_bytes(passphrase: PassphraseMaterial) -> bytes | bytearray:
+    if isinstance(passphrase, str):
+        return passphrase.encode("utf-8")
+    if isinstance(passphrase, bytearray):
+        return passphrase
+    return passphrase
+
+
+def derive_key(
+    passphrase: PassphraseMaterial,
+    salt: bytes,
+    iterations: int = KDF_ITERATIONS_CURRENT,
+) -> bytes:
     """Derive a 256-bit key from a passphrase and salt."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
@@ -57,10 +72,12 @@ def derive_key(passphrase: str, salt: bytes, iterations: int = KDF_ITERATIONS_CU
         salt=salt,
         iterations=iterations,
     )
-    return kdf.derive(passphrase.encode("utf-8"))
+    return kdf.derive(_passphrase_bytes(passphrase))
 
 
-def encrypt(plaintext: str, passphrase: str, *, iterations: int = KDF_ITERATIONS_CURRENT) -> str:
+def encrypt(
+    plaintext: str, passphrase: PassphraseMaterial, *, iterations: int = KDF_ITERATIONS_CURRENT
+) -> str:
     """Encrypt *plaintext* and return a base64-encoded v2 token.
 
     A fresh random salt and nonce are generated for every call. *iterations*
@@ -81,7 +98,7 @@ def encrypt(plaintext: str, passphrase: str, *, iterations: int = KDF_ITERATIONS
     return base64.b64encode(body).decode("ascii")
 
 
-def decrypt(token: str, passphrase: str) -> str:
+def decrypt(token: str, passphrase: PassphraseMaterial) -> str:
     """Decrypt a base64-encoded token. Auto-detects v1 vs v2 format."""
     raw = base64.b64decode(token)
     if raw[:2] == _V2_PREFIX:
@@ -116,7 +133,7 @@ def token_iterations(token: str) -> int:
     return KDF_ITERATIONS_LEGACY
 
 
-def name_lookup_key(passphrase: str) -> bytes:
+def name_lookup_key(passphrase: PassphraseMaterial) -> bytes:
     """Derive the vault-specific HMAC key for secret-name indexing.
 
     Separate from value-encryption keys so name lookups never reuse a salt
@@ -127,7 +144,7 @@ def name_lookup_key(passphrase: str) -> bytes:
     return derive_key(passphrase, _NAME_LOOKUP_KEY_SALT, KDF_ITERATIONS_CURRENT)
 
 
-def secret_name_lookup(passphrase: str, name: str, env: str) -> str:
+def secret_name_lookup(passphrase: PassphraseMaterial, name: str, env: str) -> str:
     """Return a deterministic, passphrase-bound lookup id for *(name, env)*.
 
     Stored as the primary key in schema v3 vaults so ``get`` / ``set`` /
@@ -143,11 +160,11 @@ def secret_name_lookup(passphrase: str, name: str, env: str) -> str:
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def encrypt_name(name: str, passphrase: str) -> str:
+def encrypt_name(name: str, passphrase: PassphraseMaterial) -> str:
     """Encrypt a secret name for storage (same v2 token format as values)."""
     return encrypt(name, passphrase, iterations=KDF_ITERATIONS_CURRENT)
 
 
-def decrypt_name(token: str, passphrase: str) -> str:
+def decrypt_name(token: str, passphrase: PassphraseMaterial) -> str:
     """Decrypt a stored secret name."""
     return decrypt(token, passphrase)

@@ -54,9 +54,9 @@ def passphrase_source() -> str:
     if os.environ.get("OWNLOCK_PASSPHRASE"):
         return "env var"
     try:
-        from ownlock.keyring_util import get_passphrase
+        from ownlock.keyring_util import keyring_has_passphrase
 
-        if get_passphrase():
+        if keyring_has_passphrase():
             return "keyring"
     except Exception:
         return "keyring (unavailable)"
@@ -160,9 +160,9 @@ def gather_doctor_state() -> dict[str, Any]:
         "mcp_importable": mcp_importable(),
     }
     try:
-        from ownlock.keyring_util import get_passphrase
+        from ownlock.keyring_util import keyring_has_passphrase
 
-        state["keyring_passphrase_stored"] = bool(get_passphrase())
+        state["keyring_passphrase_stored"] = keyring_has_passphrase()
     except Exception as e:
         state["keyring_passphrase_stored"] = None
         state["keyring_error"] = str(e)

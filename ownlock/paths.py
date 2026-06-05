@@ -22,6 +22,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -133,6 +134,30 @@ def resolve_vault_path(global_vault: bool = False, project: bool = False) -> Pat
     if proj:
         return proj
     return _vault_module.GLOBAL_VAULT_PATH
+
+
+def resolve_scan_vault_path(global_vault: bool = False, project: bool = False) -> Optional[Path]:
+    """Pick the vault for ``ownlock scan``.
+
+    Unlike :func:`resolve_vault_path`, scan does **not** silently fall back to
+    the global vault when no project vault exists in the cwd tree. That keeps
+    ``ownlock scan .`` in an unrelated repo from decrypting your personal
+    global vault (and failing with a confusing passphrase error). Pass
+    ``--global`` explicitly when you want to scan against the global vault.
+    """
+    if global_vault:
+        return _vault_module.GLOBAL_VAULT_PATH
+    if project:
+        return Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
+    return VaultManager.find_project_vault()
+
+
+def vault_exists(path: Path) -> bool:
+    """Return True when *path* looks like an initialized vault file."""
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def vault_path_for_ref(

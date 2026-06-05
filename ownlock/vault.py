@@ -18,6 +18,7 @@ from ownlock.crypto import (
     secret_name_lookup,
     token_iterations,
 )
+from ownlock.passphrase import Passphrase, PassphraseInput
 
 GLOBAL_VAULT_DIR = Path.home() / ".ownlock"
 GLOBAL_VAULT_PATH = GLOBAL_VAULT_DIR / "vault.db"
@@ -69,10 +70,16 @@ CREATE TABLE IF NOT EXISTS meta (
 class VaultManager:
     """Manage secrets in an encrypted SQLite vault."""
 
-    def __init__(self, db_path: Path, passphrase: str) -> None:
+    def __init__(self, db_path: Path, passphrase: PassphraseInput) -> None:
         self._db_path = db_path
-        self._passphrase = passphrase
+        if isinstance(passphrase, Passphrase):
+            self._passphrase = Passphrase.copy(passphrase)
+        else:
+            self._passphrase = Passphrase.from_str(passphrase)
         self._conn: Optional[sqlite3.Connection] = None
+
+    def _pp(self) -> bytearray:
+        return self._passphrase.material()
 
     @property
     def db_path(self) -> Path:
@@ -136,6 +143,7 @@ class VaultManager:
                 pass
             self._conn.close()
             self._conn = None
+        self._passphrase.clear()
 
     def __enter__(self) -> VaultManager:
         self.open()
@@ -221,8 +229,8 @@ class VaultManager:
         for row in rows:
             name = row["name"]
             env = row["env"]
-            lookup = secret_name_lookup(self._passphrase, name, env)
-            name_enc = encrypt_name(name, self._passphrase)
+            lookup = secret_name_lookup(self._pp(), name, env)
+            name_enc = encrypt_name(name, self._pp())
             conn.execute(
                 """INSERT INTO secrets
                    (name_lookup, name_enc, env, value_enc, created_at, updated_at)
@@ -278,9 +286,9 @@ class VaultManager:
         """Store or update a secret. New writes use the current KDF default."""
         conn = self._require_conn()
         now = datetime.now(UTC).isoformat()
-        value_token = encrypt(value, self._passphrase, iterations=KDF_ITERATIONS_CURRENT)
-        lookup = secret_name_lookup(self._passphrase, name, env)
-        name_token = encrypt_name(name, self._passphrase)
+        value_token = encrypt(value, self._pp(), iterations=KDF_ITERATIONS_CURRENT)
+        lookup = secret_name_lookup(self._pp(), name, env)
+        name_token = encrypt_name(name, self._pp())
         conn.execute(
             """INSERT INTO secrets
                (name_lookup, name_enc, env, value_enc, created_at, updated_at)
@@ -297,19 +305,19 @@ class VaultManager:
     def get(self, name: str, env: str = "default") -> Optional[str]:
         """Retrieve and decrypt a secret. Returns None if not found."""
         conn = self._require_conn()
-        lookup = secret_name_lookup(self._passphrase, name, env)
+        lookup = secret_name_lookup(self._pp(), name, env)
         row = conn.execute(
             "SELECT value_enc FROM secrets WHERE name_lookup = ?",
             (lookup,),
         ).fetchone()
         if row is None:
             return None
-        return decrypt(row["value_enc"], self._passphrase)
+        return decrypt(row["value_enc"], self._pp())
 
     def delete(self, name: str, env: str = "default") -> bool:
         """Delete a secret. Returns True if it existed."""
         conn = self._require_conn()
-        lookup = secret_name_lookup(self._passphrase, name, env)
+        lookup = secret_name_lookup(self._pp(), name, env)
         cursor = conn.execute(
             "DELETE FROM secrets WHERE name_lookup = ?",
             (lookup,),
@@ -335,7 +343,7 @@ class VaultManager:
         for row in rows:
             out.append(
                 {
-                    "name": decrypt_name(row["name_enc"], self._passphrase),
+                    "name": decrypt_name(row["name_enc"], self._pp()),
                     "env": row["env"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
@@ -352,8 +360,8 @@ class VaultManager:
             (env,),
         ).fetchall()
         return {
-            decrypt_name(row["name_enc"], self._passphrase): decrypt(
-                row["value_enc"], self._passphrase
+            decrypt_name(row["name_enc"], self._pp()): decrypt(
+                row["value_enc"], self._pp()
             )
             for row in rows
         }
@@ -397,9 +405,9 @@ class VaultManager:
         re_enc: list[tuple[str, str, str, str, str, str]] = []
         now = datetime.now(UTC).isoformat()
         for row in rows:
-            name = decrypt_name(row["name_enc"], self._passphrase)
+            name = decrypt_name(row["name_enc"], self._pp())
             env = row["env"]
-            plaintext = decrypt(row["value_enc"], self._passphrase)
+            plaintext = decrypt(row["value_enc"], self._pp())
             new_lookup = secret_name_lookup(new_passphrase, name, env)
             new_name_enc = encrypt_name(name, new_passphrase)
             new_value_enc = encrypt(
@@ -424,21 +432,37 @@ class VaultManager:
             conn.rollback()
             raise
 
-        self._passphrase = new_passphrase
+        self._passphrase.replace_from_str(new_passphrase)
         return len(re_enc)
 
     @staticmethod
     def find_project_vault() -> Optional[Path]:
-        """Walk up from cwd to find a .ownlock/vault.db."""
+        """Walk up from cwd to find a ``.ownlock/vault.db`` under a project root.
+
+        Skips :data:`GLOBAL_VAULT_PATH` — at ``$HOME/.ownlock/vault.db`` the
+        global and project-relative paths coincide, but that file is the global
+        vault, not a repo checkout's project vault.
+        """
         current = Path.cwd()
+        try:
+            global_resolved = GLOBAL_VAULT_PATH.resolve()
+        except OSError:
+            global_resolved = GLOBAL_VAULT_PATH
         for parent in [current, *current.parents]:
             candidate = parent / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
-            if candidate.exists():
-                return candidate
+            if not candidate.exists():
+                continue
+            try:
+                if candidate.resolve() == global_resolved:
+                    continue
+            except OSError:
+                if candidate == GLOBAL_VAULT_PATH:
+                    continue
+            return candidate
         return None
 
     @staticmethod
-    def init_vault(path: Path, passphrase: str) -> VaultManager:
+    def init_vault(path: Path, passphrase: PassphraseInput) -> VaultManager:
         """Create a new vault at *path*."""
         vm = VaultManager(path, passphrase)
         vm.open()

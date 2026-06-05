@@ -7,7 +7,7 @@ import json
 import os
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar
+from typing import Annotated, Any, Callable, Optional, TypeVar
 
 import typer
 from rich.console import Console
@@ -33,7 +33,12 @@ from ownlock.envfile import (
     iter_env_kv_pairs,
     rewrite_env_lines_to_vault_syntax as _rewrite_env_lines_to_vault_syntax,
 )
-from ownlock.keyring_util import resolve_passphrase, store_passphrase
+from ownlock.keyring_util import (
+    passphrase_session,
+    prompt_passphrase_session,
+    store_passphrase,
+)
+from ownlock.passphrase import PassphraseInput
 from ownlock.paths import (
     OWNLOCK_GITIGNORE_ENTRY,
     SECRET_NAME_RE,
@@ -42,9 +47,11 @@ from ownlock.paths import (
     is_tty as _is_tty,
     is_valid_secret_name as _is_valid_secret_name,
     resolve_vault_path as _resolve_vault_path,
+    resolve_scan_vault_path as _resolve_scan_vault_path,
     validate_env_file as _validate_env_file,
     validate_scan_dir as _validate_scan_dir,
     validate_secret_name as _validate_secret_name,
+    vault_exists as _vault_exists,
     vault_path_for_ref as _vault_path_for_ref,
 )
 from ownlock.scanner import (
@@ -195,7 +202,7 @@ app = typer.Typer(
 console = Console()
 
 
-def _offer_import_after_init(vault_path: Path, passphrase: str) -> None:
+def _offer_import_after_init(vault_path: Path, passphrase: PassphraseInput) -> None:
     """Walk a fresh vault owner through populating it from an existing ``.env``.
 
     Triggers only when:
@@ -262,13 +269,14 @@ def _init_global_vault() -> None:
             f"[yellow]Vault already exists at {_format_vault_path(GLOBAL_VAULT_PATH)}[/yellow]"
         )
         raise typer.Exit(0)
-    passphrase = _prompt_new_passphrase()
-    VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
-    _save_passphrase_to_keyring(passphrase)
-    audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
-    console.print(
-        f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]"
-    )
+    pp_str = _prompt_new_passphrase()
+    with prompt_passphrase_session(pp_str) as pp:
+        VaultManager.init_vault(GLOBAL_VAULT_PATH, pp).close()
+        _save_passphrase_to_keyring(pp_str)
+        audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
+        console.print(
+            f"[green]Vault created at {_format_vault_path(GLOBAL_VAULT_PATH)}[/green]"
+        )
 
 
 def _init_project_vault(project_path: Path) -> None:
@@ -292,28 +300,29 @@ def _init_project_vault(project_path: Path) -> None:
         raise typer.Exit(0)
 
     if not GLOBAL_VAULT_PATH.exists():
-        passphrase = _prompt_new_passphrase()
-        VaultManager.init_vault(GLOBAL_VAULT_PATH, passphrase).close()
-        _save_passphrase_to_keyring(passphrase)
-        VaultManager.init_vault(project_path, passphrase).close()
-        _ensure_gitignore()
-        audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
-        audit.record("init", vault_path=project_path, extra={"scope": "project"})
-        console.print(
-            f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
-            f"[dim](passphrase in keyring; global vault at "
-            f"{_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
-        )
+        pp_str = _prompt_new_passphrase()
+        with prompt_passphrase_session(pp_str) as pp:
+            VaultManager.init_vault(GLOBAL_VAULT_PATH, pp).close()
+            _save_passphrase_to_keyring(pp_str)
+            VaultManager.init_vault(project_path, pp).close()
+            _ensure_gitignore()
+            audit.record("init", vault_path=GLOBAL_VAULT_PATH, extra={"scope": "global"})
+            audit.record("init", vault_path=project_path, extra={"scope": "project"})
+            console.print(
+                f"[green]Vault created at {_format_vault_path(project_path)}[/green] "
+                f"[dim](passphrase in keyring; global vault at "
+                f"{_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
+            )
+            _offer_import_after_init(project_path, pp)
     else:
-        passphrase = resolve_passphrase()
-        VaultManager.init_vault(project_path, passphrase).close()
-        _ensure_gitignore()
-        audit.record("init", vault_path=project_path, extra={"scope": "project"})
-        console.print(
-            f"[green]Vault created at {_format_vault_path(project_path)}[/green]"
-        )
-
-    _offer_import_after_init(project_path, passphrase)
+        with passphrase_session() as pp:
+            VaultManager.init_vault(project_path, pp).close()
+            _ensure_gitignore()
+            audit.record("init", vault_path=project_path, extra={"scope": "project"})
+            console.print(
+                f"[green]Vault created at {_format_vault_path(project_path)}[/green]"
+            )
+            _offer_import_after_init(project_path, pp)
 
 
 @app.command()
@@ -435,11 +444,11 @@ def set_secret(
         raise typer.Exit(1)
     _validate_secret_name(name)
 
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        vm.set(name, value, env)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            vm.set(name, value, env)
 
     audit.record("set", vault_path=vault_path, name=name, env=env)
     console.print(f"[green]Secret '{name}' stored (env={env}).[/green]")
@@ -454,11 +463,11 @@ def get_secret(
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Retrieve and print a decrypted secret."""
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        value = vm.get(name, env)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            value = vm.get(name, env)
 
     if value is None:
         console.print(f"[red]Secret '{name}' not found (env={env}).[/red]")
@@ -476,11 +485,11 @@ def list_secrets(
     as_json: bool = typer.Option(False, "--json", help="Print JSON array of name/env/timestamps (no secret values)."),
 ) -> None:
     """List stored secret names (never values)."""
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        secrets = vm.list_secrets(env)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            secrets = vm.list_secrets(env)
 
     if not secrets:
         if as_json:
@@ -563,149 +572,150 @@ def rekey(
         console.print(f"[red]Vault not found at {_format_vault_path(vault_path)}.[/red]")
         raise typer.Exit(1)
 
-    passphrase = resolve_passphrase()
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            meta = vm.get_meta()
+            schema = vm.schema_version()
+            current_iters = vm.kdf_iterations()
+            iter_summary = vm.secret_iterations_summary()
+            secret_count = sum(iter_summary.values())
+            envs = sorted({s["env"] for s in vm.list_secrets()})
 
-    with VaultManager(vault_path, passphrase) as vm:
-        meta = vm.get_meta()
-        schema = vm.schema_version()
-        current_iters = vm.kdf_iterations()
-        iter_summary = vm.secret_iterations_summary()
-        secret_count = sum(iter_summary.values())
-        envs = sorted({s["env"] for s in vm.list_secrets()})
+        is_kdf_stale = current_iters < KDF_ITERATIONS_CURRENT or any(
+            i < KDF_ITERATIONS_CURRENT for i in iter_summary
+        )
 
-    is_kdf_stale = current_iters < KDF_ITERATIONS_CURRENT or any(
-        i < KDF_ITERATIONS_CURRENT for i in iter_summary
-    )
+        # Decide actions: explicit flags win; otherwise interactive prompts.
+        do_upgrade_kdf = upgrade_kdf
+        do_rotate = rotate_passphrase
 
-    # Decide actions: explicit flags win; otherwise interactive prompts.
-    do_upgrade_kdf = upgrade_kdf
-    do_rotate = rotate_passphrase
-
-    if not (upgrade_kdf or rotate_passphrase):
-        if _is_tty() and not yes:
-            console.print(f"[bold]Vault[/bold]: {_format_vault_path(vault_path)}")
-            console.print(
-                f"  schema:        v{schema}"
-                + ("" if schema == 2 else "  [yellow](current: v2)[/yellow]")
-            )
-            console.print(
-                f"  kdf:           {meta.get('kdf_algo', 'PBKDF2-HMAC-SHA256')}, "
-                f"{current_iters:,} iterations"
-                + ("" if not is_kdf_stale else f"  [yellow](current: {KDF_ITERATIONS_CURRENT:,})[/yellow]")
-            )
-            if iter_summary:
-                breakdown = ", ".join(
-                    f"{count} at {iters:,}" for iters, count in sorted(iter_summary.items())
-                )
-                console.print(f"  secrets:       {secret_count} ({breakdown})")
-            else:
-                console.print("  secrets:       0")
-            if envs:
-                console.print(f"  environments:  {', '.join(envs)}")
-
-            do_upgrade_kdf = typer.confirm(
-                "Upgrade KDF to current parameters?",
-                default=is_kdf_stale,
-            )
-            do_rotate = typer.confirm(
-                "Rotate passphrase to a new one?",
-                default=False,
-            )
-        else:
-            console.print(
-                "[red]Pass --upgrade-kdf and/or --rotate-passphrase, or run interactively.[/red]"
-            )
-            raise typer.Exit(1)
-
-    if not (do_upgrade_kdf or do_rotate):
-        console.print("[dim]Nothing to do.[/dim]")
-        return
-
-    new_passphrase = passphrase
-    if do_rotate:
-        env_pp = os.environ.get("OWNLOCK_NEW_PASSPHRASE")
-        if env_pp:
-            new_passphrase = env_pp
-        else:
-            if not _is_tty() and not yes:
+        if not (upgrade_kdf or rotate_passphrase):
+            if _is_tty() and not yes:
+                console.print(f"[bold]Vault[/bold]: {_format_vault_path(vault_path)}")
                 console.print(
-                    "[red]Cannot rotate passphrase non-interactively without "
-                    "OWNLOCK_NEW_PASSPHRASE.[/red]"
+                    f"  schema:        v{schema}"
+                    + ("" if schema == 2 else "  [yellow](current: v2)[/yellow]")
+                )
+                console.print(
+                    f"  kdf:           {meta.get('kdf_algo', 'PBKDF2-HMAC-SHA256')}, "
+                    f"{current_iters:,} iterations"
+                    + ("" if not is_kdf_stale else f"  [yellow](current: {KDF_ITERATIONS_CURRENT:,})[/yellow]")
+                )
+                if iter_summary:
+                    breakdown = ", ".join(
+                        f"{count} at {iters:,}" for iters, count in sorted(iter_summary.items())
+                    )
+                    console.print(f"  secrets:       {secret_count} ({breakdown})")
+                else:
+                    console.print("  secrets:       0")
+                if envs:
+                    console.print(f"  environments:  {', '.join(envs)}")
+
+                do_upgrade_kdf = typer.confirm(
+                    "Upgrade KDF to current parameters?",
+                    default=is_kdf_stale,
+                )
+                do_rotate = typer.confirm(
+                    "Rotate passphrase to a new one?",
+                    default=False,
+                )
+            else:
+                console.print(
+                    "[red]Pass --upgrade-kdf and/or --rotate-passphrase, or run interactively.[/red]"
                 )
                 raise typer.Exit(1)
-            new_passphrase = _prompt_new_passphrase("new vault")
 
-    target_iters = KDF_ITERATIONS_CURRENT  # always re-encrypt at current default
+        if not (do_upgrade_kdf or do_rotate):
+            console.print("[dim]Nothing to do.[/dim]")
+            return
 
-    # Idempotent fast-path: nothing to do if already at current params and not rotating.
-    if (
-        not do_rotate
-        and current_iters == KDF_ITERATIONS_CURRENT
-        and iter_summary == {KDF_ITERATIONS_CURRENT: secret_count}
-        and schema >= SCHEMA_VERSION_CURRENT
-    ):
-        console.print(
-            f"[dim]Vault is already at schema v{SCHEMA_VERSION_CURRENT}, "
-            f"KDF {KDF_ITERATIONS_CURRENT:,}. Nothing to upgrade.[/dim]"
-        )
-        return
-
-    if _is_tty() and not yes:
-        action_parts: list[str] = []
-        if do_upgrade_kdf and current_iters != KDF_ITERATIONS_CURRENT:
-            action_parts.append(
-                f"raise KDF iterations to {KDF_ITERATIONS_CURRENT:,}"
-            )
+        new_passphrase: str
         if do_rotate:
-            action_parts.append("rotate the passphrase")
-        action_str = " and ".join(action_parts) if action_parts else "re-encrypt secrets"
-        if not typer.confirm(
-            f"Re-encrypt {secret_count} secret(s) to {action_str}?", default=True
+            env_pp = os.environ.get("OWNLOCK_NEW_PASSPHRASE")
+            if env_pp:
+                new_passphrase = env_pp
+            else:
+                if not _is_tty() and not yes:
+                    console.print(
+                        "[red]Cannot rotate passphrase non-interactively without "
+                        "OWNLOCK_NEW_PASSPHRASE.[/red]"
+                    )
+                    raise typer.Exit(1)
+                new_passphrase = _prompt_new_passphrase("new vault")
+        else:
+            new_passphrase = bytes(passphrase.material()).decode()
+
+        target_iters = KDF_ITERATIONS_CURRENT  # always re-encrypt at current default
+
+        # Idempotent fast-path: nothing to do if already at current params and not rotating.
+        if (
+            not do_rotate
+            and current_iters == KDF_ITERATIONS_CURRENT
+            and iter_summary == {KDF_ITERATIONS_CURRENT: secret_count}
+            and schema >= SCHEMA_VERSION_CURRENT
         ):
-            console.print("[dim]Cancelled.[/dim]")
+            console.print(
+                f"[dim]Vault is already at schema v{SCHEMA_VERSION_CURRENT}, "
+                f"KDF {KDF_ITERATIONS_CURRENT:,}. Nothing to upgrade.[/dim]"
+            )
+            return
+
+        if _is_tty() and not yes:
+            action_parts: list[str] = []
+            if do_upgrade_kdf and current_iters != KDF_ITERATIONS_CURRENT:
+                action_parts.append(
+                    f"raise KDF iterations to {KDF_ITERATIONS_CURRENT:,}"
+                )
+            if do_rotate:
+                action_parts.append("rotate the passphrase")
+            action_str = " and ".join(action_parts) if action_parts else "re-encrypt secrets"
+            if not typer.confirm(
+                f"Re-encrypt {secret_count} secret(s) to {action_str}?", default=True
+            ):
+                console.print("[dim]Cancelled.[/dim]")
+                raise typer.Exit(1)
+
+        backup_path = _backup_vault_file(vault_path)
+        console.print(f"[dim]Backed up vault to {backup_path}.[/dim]")
+
+        try:
+            with VaultManager(vault_path, passphrase) as vm:
+                count = vm.rekey(new_passphrase, target_iterations=target_iters)
+        except Exception as e:
+            console.print(
+                f"[red]Rekey failed: {e}. Live vault is unchanged. "
+                f"Backup at {backup_path}.[/red]"
+            )
             raise typer.Exit(1)
 
-    backup_path = _backup_vault_file(vault_path)
-    console.print(f"[dim]Backed up vault to {backup_path}.[/dim]")
-
-    try:
-        with VaultManager(vault_path, passphrase) as vm:
-            count = vm.rekey(new_passphrase, target_iterations=target_iters)
-    except Exception as e:
-        console.print(
-            f"[red]Rekey failed: {e}. Live vault is unchanged. "
-            f"Backup at {backup_path}.[/red]"
+        audit.record(
+            "rekey",
+            vault_path=vault_path,
+            extra={
+                "secrets_rekeyed": count,
+                "rotated_passphrase": do_rotate,
+                "target_iterations": target_iters,
+            },
         )
-        raise typer.Exit(1)
+        console.print(f"[green]Re-encrypted {count} secret(s).[/green]")
 
-    audit.record(
-        "rekey",
-        vault_path=vault_path,
-        extra={
-            "secrets_rekeyed": count,
-            "rotated_passphrase": do_rotate,
-            "target_iterations": target_iters,
-        },
-    )
-    console.print(f"[green]Re-encrypted {count} secret(s).[/green]")
+        # Two-phase keyring update: only after the SQL transaction succeeds.
+        if do_rotate and not no_keyring:
+            ok, err = store_passphrase(new_passphrase)
+            if ok:
+                console.print("[dim]Updated keyring with new passphrase.[/dim]")
+            else:
+                detail = f" ({err})" if err else ""
+                msg = (
+                    "[yellow]Could not update keyring"
+                    + detail
+                    + ". Set OWNLOCK_PASSPHRASE to the new passphrase or update the keyring manually.[/yellow]"
+                )
+                console.print(msg)
 
-    # Two-phase keyring update: only after the SQL transaction succeeds.
-    if do_rotate and not no_keyring:
-        ok, err = store_passphrase(new_passphrase)
-        if ok:
-            console.print("[dim]Updated keyring with new passphrase.[/dim]")
-        else:
-            detail = f" ({err})" if err else ""
-            msg = (
-                "[yellow]Could not update keyring"
-                + detail
-                + ". Set OWNLOCK_PASSPHRASE to the new passphrase or update the keyring manually.[/yellow]"
-            )
-            console.print(msg)
-
-    console.print(
-        f"[dim]Backup left at {backup_path}; remove once you've verified the new vault works.[/dim]"
-    )
+        console.print(
+            f"[dim]Backup left at {backup_path}; remove once you've verified the new vault works.[/dim]"
+        )
 
 
 @app.command()
@@ -717,11 +727,11 @@ def delete(
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
 ) -> None:
     """Delete a secret from the vault."""
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        removed = vm.delete(name, env)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            removed = vm.delete(name, env)
 
     if removed:
         audit.record("delete", vault_path=vault_path, name=name, env=env)
@@ -776,36 +786,37 @@ def run(
     from ownlock.redactor import SecretRedactor
 
     env_file = _validate_env_file(env_file)
-    passphrase = resolve_passphrase()
-    resolved, secret_names = resolve_env_file(env_file, passphrase, env=env)
 
-    rendered_outputs: list[Path] = []
-    if render_templates:
-        rendered_outputs = _render_explicit_templates(
-            render_templates,
-            passphrase,
-            default_env=env,
-            force=force_render,
-            raw=raw_render,
-        )
+    with passphrase_session() as passphrase:
+        resolved, secret_names = resolve_env_file(env_file, passphrase, env=env)
 
-    if no_redact:
-        secrets_for_redaction: dict[str, str] = {}
-    else:
-        # Redact every value ownlock injects — vault-resolved secrets *and*
-        # inline .env literals (common during migration before rewrite-env).
-        secrets_for_redaction = dict(resolved)
+        rendered_outputs: list[Path] = []
+        if render_templates:
+            rendered_outputs = _render_explicit_templates(
+                render_templates,
+                passphrase,
+                default_env=env,
+                force=force_render,
+                raw=raw_render,
+            )
 
-    redactor = SecretRedactor(secrets_for_redaction)
-    try:
-        exit_code = redactor.run_process(command, resolved)
-    finally:
-        if render_cleanup and rendered_outputs:
-            for p in rendered_outputs:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+        if no_redact:
+            secrets_for_redaction: dict[str, str] = {}
+        else:
+            # Redact every value ownlock injects — vault-resolved secrets *and*
+            # inline .env literals (common during migration before rewrite-env).
+            secrets_for_redaction = dict(resolved)
+
+        redactor = SecretRedactor(secrets_for_redaction)
+        try:
+            exit_code = redactor.run_process(command, resolved)
+        finally:
+            if render_cleanup and rendered_outputs:
+                for p in rendered_outputs:
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
     raise typer.Exit(exit_code)
 
 
@@ -848,68 +859,67 @@ def render(
         write_atomic,
     )
 
-    passphrase = resolve_passphrase()
-
-    if template is not None:
-        template = _validate_env_file(template)
-        if not template.exists():
-            console.print("[red]Template not found.[/red]")
-            raise typer.Exit(1)
-        if out is not None:
-            dst = _validate_env_file(out)
+    with passphrase_session() as passphrase:
+        if template is not None:
+            template = _validate_env_file(template)
+            if not template.exists():
+                console.print("[red]Template not found.[/red]")
+                raise typer.Exit(1)
+            if out is not None:
+                dst = _validate_env_file(out)
+            else:
+                try:
+                    dst = template_output_path(template)
+                except ValueError as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
+            pairs: list[tuple[Path, Path]] = [(template, dst)]
         else:
-            try:
-                dst = template_output_path(template)
-            except ValueError as e:
-                console.print(f"[red]{e}[/red]")
+            if out is not None:
+                console.print("[red]--out is only valid when rendering a single template.[/red]")
                 raise typer.Exit(1)
-        pairs: list[tuple[Path, Path]] = [(template, dst)]
-    else:
-        if out is not None:
-            console.print("[red]--out is only valid when rendering a single template.[/red]")
-            raise typer.Exit(1)
-        discovered = discover_templates(Path.cwd())
-        if not discovered:
-            console.print("[dim]No *.template.* files found under current directory.[/dim]")
+            discovered = discover_templates(Path.cwd())
+            if not discovered:
+                console.print("[dim]No *.template.* files found under current directory.[/dim]")
+                return
+            pairs = [(t, template_output_path(t)) for t in discovered]
+
+        if dry_run:
+            for src, dst in pairs:
+                fmt = "raw" if raw else detect_format(dst)
+                console.print(f"  {src} -> {dst} [{fmt}]")
             return
-        pairs = [(t, template_output_path(t)) for t in discovered]
 
-    if dry_run:
-        for src, dst in pairs:
-            fmt = "raw" if raw else detect_format(dst)
-            console.print(f"  {src} -> {dst} [{fmt}]")
-        return
-
-    rendered = 0
-    with VaultLookup(passphrase) as lookup:
-        for src, dst in pairs:
-            text = src.read_text(encoding="utf-8")
-            default_format = "raw" if raw else detect_format(dst)
-            new_text, refs = render_text(
-                text, lookup, default_env=env, default_format=default_format
-            )
-            if refs == 0:
-                console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
-                continue
-            if not force and not is_path_gitignored(dst):
-                console.print(
-                    f"[red]{dst} does not appear to be gitignored. Refusing to write.[/red]"
+        rendered = 0
+        with VaultLookup(passphrase) as lookup:
+            for src, dst in pairs:
+                text = src.read_text(encoding="utf-8")
+                default_format = "raw" if raw else detect_format(dst)
+                new_text, refs = render_text(
+                    text, lookup, default_env=env, default_format=default_format
                 )
+                if refs == 0:
+                    console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
+                    continue
+                if not force and not is_path_gitignored(dst):
+                    console.print(
+                        f"[red]{dst} does not appear to be gitignored. Refusing to write.[/red]"
+                    )
+                    console.print(
+                        f"[dim]Add '{dst.name}' (or the full path) to .gitignore, "
+                        "or re-run with --force.[/dim]"
+                    )
+                    raise typer.Exit(1)
+                write_atomic(dst, new_text)
                 console.print(
-                    f"[dim]Add '{dst.name}' (or the full path) to .gitignore, "
-                    "or re-run with --force.[/dim]"
+                    f"[green]Rendered {src} -> {dst} "
+                    f"({refs} value(s), format={default_format}).[/green]"
                 )
-                raise typer.Exit(1)
-            write_atomic(dst, new_text)
-            console.print(
-                f"[green]Rendered {src} -> {dst} "
-                f"({refs} value(s), format={default_format}).[/green]"
-            )
-            _warn_unmatched(src, new_text, find_unmatched_vault_refs)
-            rendered += 1
+                _warn_unmatched(src, new_text, find_unmatched_vault_refs)
+                rendered += 1
 
-    if rendered == 0:
-        console.print("[dim]Nothing rendered.[/dim]")
+        if rendered == 0:
+            console.print("[dim]Nothing rendered.[/dim]")
 
 
 def _warn_unmatched(src: Path, rendered_text: str, finder) -> None:
@@ -930,7 +940,7 @@ def _warn_unmatched(src: Path, rendered_text: str, finder) -> None:
 
 def _render_explicit_templates(
     templates: list[Path],
-    passphrase: str,
+    passphrase: PassphraseInput,
     *,
     default_env: str = "default",
     force: bool = False,
@@ -1014,18 +1024,18 @@ def export_env(
     from ownlock.resolver import resolve_env_file
 
     if example:
-        passphrase = resolve_passphrase()
         vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
-        with VaultManager(vault_path, passphrase) as vm:
-            rows = vm.list_secrets(env)
+        with passphrase_session() as passphrase:
+            with VaultManager(vault_path, passphrase) as vm:
+                rows = vm.list_secrets(env)
         for s in sorted(rows, key=lambda x: x["name"]):
             name = s["name"]
             typer.echo(f"{name}={format_vault_expr(name, env)}")
         return
 
     env_file = _validate_env_file(env_file)
-    passphrase = resolve_passphrase()
-    resolved, _ = resolve_env_file(env_file, passphrase, env=env)
+    with passphrase_session() as passphrase:
+        resolved, _ = resolve_env_file(env_file, passphrase, env=env)
 
     def _quote_value(v: str) -> str:
         if not any(c in v for c in "= \n\t\"'\\"):
@@ -1084,14 +1094,14 @@ def _pick_indexes_interactively(
 
 
 def _collect_env_files(
-    positional: Optional[Path],
+    positional: Optional[list[Path]],
     files: Optional[list[Path]],
 ) -> list[Path]:
     """Build the file list for ``ownlock import``.
 
     Resolution order:
 
-    1. Positional argument, if given (single file).
+    1. Positional argument(s), if given (one or more paths).
     2. ``-f / --file`` (repeatable), if given.
     3. Auto-discover from :data:`DEFAULT_ENV_FILE_CANDIDATES` in cwd.
 
@@ -1099,12 +1109,15 @@ def _collect_env_files(
     is a hard error (the user typed an explicit path), but missing files in
     auto-discovery just get filtered out.
     """
-    if positional is not None:
-        validated = _validate_env_file(positional)
-        if not validated.exists():
-            console.print(f"[red]File not found: {positional}[/red]")
-            raise typer.Exit(1)
-        return [validated]
+    if positional:
+        out: list[Path] = []
+        for p in positional:
+            v = _validate_env_file(Path(p))
+            if not v.exists():
+                console.print(f"[red]File not found: {p}[/red]")
+                raise typer.Exit(1)
+            out.append(v)
+        return out
 
     if files:
         out: list[Path] = []
@@ -1127,7 +1140,7 @@ def _collect_env_files(
 def _import_seed_flow(
     files: list[Path],
     vault_path: Path,
-    passphrase: str,
+    passphrase: PassphraseInput,
     env: str,
     *,
     yes: bool,
@@ -1212,7 +1225,7 @@ def _import_seed_flow(
 def _import_vault_refs_flow(
     files: list[Path],
     vault_path: Path,
-    passphrase: str,
+    passphrase: PassphraseInput,
     default_env: str,
     *,
     yes: bool,
@@ -1358,10 +1371,12 @@ def _import_vault_refs_flow(
 @app.command("import")
 @_safe_command
 def import_env(
-    env_file: Optional[Path] = typer.Argument(
-        None,
-        help="Env file to import. Omit to use -f or auto-discover .env / .env.local / etc.",
-    ),
+    env_files: Annotated[
+        Optional[list[Path]],
+        typer.Argument(
+            help="Env file(s) to import. Omit to auto-discover .env / .env.local / etc.",
+        ),
+    ] = None,
     files: Optional[list[Path]] = typer.Option(
         None,
         "-f",
@@ -1400,7 +1415,7 @@ def import_env(
     Run with no arguments to auto-discover ``.env`` / ``.env.local`` /
     ``.env.development`` / ``.env.production`` in the current directory.
     """
-    selected_files = _collect_env_files(env_file, files)
+    selected_files = _collect_env_files(env_files, files)
     if not selected_files:
         console.print(
             "[dim]No env files found. Pass a path, use -f, or create one of "
@@ -1409,13 +1424,7 @@ def import_env(
         return
 
     is_tty = _is_tty()
-    explicit_paths = env_file is not None or files is not None
-    if (
-        is_tty
-        and not yes
-        and not explicit_paths
-        and len(selected_files) > 1
-    ):
+    if is_tty and not yes and len(selected_files) > 1:
         console.print(f"[{_STYLE_PICK_HEADER}]Found env files:[/{_STYLE_PICK_HEADER}]")
         selected_files = _pick_indexes_interactively(
             selected_files,
@@ -1435,29 +1444,29 @@ def import_env(
             "vault() references; ignoring.[/yellow]"
         )
 
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    if has_vault_refs:
-        _import_vault_refs_flow(
-            selected_files,
-            vault_path,
-            passphrase,
-            env,
-            yes=yes,
-            values_from=values_from,
-            is_tty=is_tty,
-        )
-    else:
-        _import_seed_flow(
-            selected_files,
-            vault_path,
-            passphrase,
-            env,
-            yes=yes,
-            rewrite=rewrite,
-            is_tty=is_tty,
-        )
+    with passphrase_session() as passphrase:
+        if has_vault_refs:
+            _import_vault_refs_flow(
+                selected_files,
+                vault_path,
+                passphrase,
+                env,
+                yes=yes,
+                values_from=values_from,
+                is_tty=is_tty,
+            )
+        else:
+            _import_seed_flow(
+                selected_files,
+                vault_path,
+                passphrase,
+                env,
+                yes=yes,
+                rewrite=rewrite,
+                is_tty=is_tty,
+            )
 
 
 _COMPLETION_SHELLS = {"bash", "zsh", "fish", "pwsh", "powershell"}
@@ -1650,21 +1659,21 @@ def share(
     """
     from ownlock.share import export_bundle
 
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        rows = vm.list_secrets(env)
-        decrypted: list[dict[str, str]] = []
-        for row in rows:
-            if secret_names and row["name"] not in secret_names:
-                continue
-            value = vm.get(row["name"], row["env"])
-            if value is None:
-                continue
-            decrypted.append(
-                {"name": row["name"], "env": row["env"], "value": value}
-            )
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            rows = vm.list_secrets(env)
+            decrypted: list[dict[str, str]] = []
+            for row in rows:
+                if secret_names and row["name"] not in secret_names:
+                    continue
+                value = vm.get(row["name"], row["env"])
+                if value is None:
+                    continue
+                decrypted.append(
+                    {"name": row["name"], "env": row["env"], "value": value}
+                )
 
     if not decrypted:
         if secret_names:
@@ -1764,55 +1773,55 @@ def import_share(
         console.print("[dim]Bundle is empty; nothing to import.[/dim]")
         return
 
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    # Detect conflicts before writing anything.
-    conflicts: list[tuple[str, str]] = []
-    with VaultManager(vault_path, passphrase) as vm:
-        for entry in secrets:
-            if vm.get(entry["name"], entry["env"]) is not None:
-                conflicts.append((entry["name"], entry["env"]))
+    with passphrase_session() as passphrase:
+        # Detect conflicts before writing anything.
+        conflicts: list[tuple[str, str]] = []
+        with VaultManager(vault_path, passphrase) as vm:
+            for entry in secrets:
+                if vm.get(entry["name"], entry["env"]) is not None:
+                    conflicts.append((entry["name"], entry["env"]))
 
-    if conflicts and not overwrite:
-        console.print(
-            f"[yellow]{len(conflicts)} secret(s) in the bundle already exist in the vault:[/yellow]"
-        )
-        for name, env in conflicts[:10]:
-            suffix = f" (env={env})" if env != "default" else ""
-            console.print(f"  - {name}{suffix}")
-        if len(conflicts) > 10:
-            console.print(f"  ... and {len(conflicts) - 10} more")
-        if _is_tty() and not yes:
-            if not typer.confirm("Overwrite them?", default=False):
+        if conflicts and not overwrite:
+            console.print(
+                f"[yellow]{len(conflicts)} secret(s) in the bundle already exist in the vault:[/yellow]"
+            )
+            for name, env in conflicts[:10]:
+                suffix = f" (env={env})" if env != "default" else ""
+                console.print(f"  - {name}{suffix}")
+            if len(conflicts) > 10:
+                console.print(f"  ... and {len(conflicts) - 10} more")
+            if _is_tty() and not yes:
+                if not typer.confirm("Overwrite them?", default=False):
+                    console.print(
+                        "[dim]Cancelled. Run with --overwrite to overwrite, or "
+                        "delete conflicting keys first.[/dim]"
+                    )
+                    raise typer.Exit(1)
+            else:
                 console.print(
-                    "[dim]Cancelled. Run with --overwrite to overwrite, or "
-                    "delete conflicting keys first.[/dim]"
+                    "[red]Refusing to overwrite without --overwrite (or interactive confirm).[/red]"
                 )
                 raise typer.Exit(1)
-        else:
-            console.print(
-                "[red]Refusing to overwrite without --overwrite (or interactive confirm).[/red]"
-            )
-            raise typer.Exit(1)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        for entry in secrets:
-            vm.set(entry["name"], entry["value"], entry["env"])
+        with VaultManager(vault_path, passphrase) as vm:
+            for entry in secrets:
+                vm.set(entry["name"], entry["value"], entry["env"])
 
-    audit.record(
-        "import-share",
-        vault_path=vault_path,
-        extra={
-            "bundle_path": str(bundle_file),
-            "secrets_imported": len(secrets),
-            "names": sorted({s["name"] for s in secrets}),
-        },
-    )
-    console.print(
-        f"[green]Imported {len(secrets)} secret(s) into "
-        f"{_format_vault_path(vault_path)}.[/green]"
-    )
+        audit.record(
+            "import-share",
+            vault_path=vault_path,
+            extra={
+                "bundle_path": str(bundle_file),
+                "secrets_imported": len(secrets),
+                "names": sorted({s["name"] for s in secrets}),
+            },
+        )
+        console.print(
+            f"[green]Imported {len(secrets)} secret(s) into "
+            f"{_format_vault_path(vault_path)}.[/green]"
+        )
 
 
 @app.command("rewrite-env")
@@ -1833,28 +1842,28 @@ def rewrite_env(
     original_text = env_file.read_text()
     lines = original_text.splitlines()
 
-    passphrase = resolve_passphrase()
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
-    with VaultManager(vault_path, passphrase) as vm:
-        existing = vm.get_all_decrypted(env)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            existing = vm.get_all_decrypted(env)
 
-    new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
+        new_lines, changed = _rewrite_env_lines_to_vault_syntax(lines, existing, env)
 
-    if changed == 0:
-        console.print("[dim]No changes needed; env file already uses vault() or keys not in vault.[/dim]")
-        return
+        if changed == 0:
+            console.print("[dim]No changes needed; env file already uses vault() or keys not in vault.[/dim]")
+            return
 
-    if _is_tty() and not yes:
-        if not typer.confirm(
-            f"Rewrite {env_file} replacing values for {changed} key(s) with vault() references?", default=False
-        ):
-            console.print("[dim]Rewrite cancelled.[/dim]")
-            raise typer.Exit(1)
+        if _is_tty() and not yes:
+            if not typer.confirm(
+                f"Rewrite {env_file} replacing values for {changed} key(s) with vault() references?", default=False
+            ):
+                console.print("[dim]Rewrite cancelled.[/dim]")
+                raise typer.Exit(1)
 
-    backup_path = _write_env_backup(env_file, original_text)
-    env_file.write_text("\n".join(new_lines) + "\n")
-    _print_env_rewrite_result(changed, env_file, backup_path)
+        backup_path = _write_env_backup(env_file, original_text)
+        env_file.write_text("\n".join(new_lines) + "\n")
+        _print_env_rewrite_result(changed, env_file, backup_path)
 
 
 @app.command()
@@ -1885,15 +1894,42 @@ def scan(
                 console.print("[dim]Scan cancelled.[/dim]")
                 raise typer.Exit(1)
 
-    passphrase = resolve_passphrase()
-    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    vault_path = _resolve_scan_vault_path(global_vault=global_vault, project=project)
+    all_secrets: dict[str, str] = {}
 
-    with VaultManager(vault_path, passphrase) as vm:
-        all_secrets = vm.get_all_decrypted(env)
+    if vault_path is None:
+        console.print(
+            "[dim]No project vault found; scanning for legacy backup files only. "
+            "Use --global to compare files against the global vault.[/dim]"
+        )
+    elif not _vault_exists(vault_path):
+        console.print(
+            f"[dim]Vault not found at {_format_vault_path(vault_path)}; "
+            "scanning for legacy backup files only.[/dim]"
+        )
+    else:
+        from cryptography.exceptions import InvalidTag
 
-    if not all_secrets:
-        console.print("[dim]No secrets in vault to scan for.[/dim]")
-        return
+        try:
+            with passphrase_session() as passphrase:
+                with VaultManager(vault_path, passphrase) as vm:
+                    all_secrets = vm.get_all_decrypted(env)
+        except InvalidTag:
+            console.print(
+                f"[red]Passphrase does not unlock vault at "
+                f"{_format_vault_path(vault_path)}.[/red]"
+            )
+            console.print(
+                "[dim]Keyring or OWNLOCK_PASSPHRASE may be stale — run "
+                "'ownlock init' to update the keyring, or set the correct "
+                "OWNLOCK_PASSPHRASE. Continuing with legacy-backup scan only.[/dim]"
+            )
+        else:
+            if not all_secrets:
+                console.print(
+                    f"[dim]No secrets in vault at {_format_vault_path(vault_path)} "
+                    f"(env={env}); value comparison skipped.[/dim]"
+                )
 
     result = scan_directory(
         directory,
@@ -1925,9 +1961,10 @@ def scan(
             )
         raise typer.Exit(1)
     if result.legacy_backups:
-        # Legacy backups alone are still a finding worth blocking on, even if
-        # no current vault value matched (the vault may have rotated since).
         raise typer.Exit(1)
-    console.print("[green]No leaked secrets found.[/green]")
+    if all_secrets:
+        console.print("[green]No leaked secrets found.[/green]")
+    else:
+        console.print("[dim]No legacy backup files found.[/dim]")
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from ownlock import vault as _vault_module
+from ownlock.passphrase import Passphrase, PassphraseInput
 from ownlock.vault import VaultManager
 
 # vault() reference: "vault(" + quoted name + optional kwargs blob + ")"
@@ -55,8 +56,11 @@ class VaultLookup:
     - Otherwise the global vault is used.
     """
 
-    def __init__(self, passphrase: str) -> None:
-        self._passphrase = passphrase
+    def __init__(self, passphrase: PassphraseInput) -> None:
+        if isinstance(passphrase, Passphrase):
+            self._passphrase = Passphrase.copy(passphrase)
+        else:
+            self._passphrase = Passphrase.from_str(passphrase)
         self._project_path = VaultManager.find_project_vault()
         self._global_vm: Optional[VaultManager] = None
         self._project_vm: Optional[VaultManager] = None
@@ -110,6 +114,7 @@ class VaultLookup:
         if self._project_vm is not None:
             self._project_vm.close()
             self._project_vm = None
+        self._passphrase.clear()
 
     def __enter__(self) -> "VaultLookup":
         return self
@@ -151,7 +156,7 @@ def collect_vault_refs(env_path: Path) -> list[dict[str, Optional[str]]]:
 
 def resolve_env_file(
     env_path: Path,
-    passphrase: str,
+    passphrase: PassphraseInput,
     *,
     env: str = "default",
 ) -> tuple[dict[str, str], list[str]]:
