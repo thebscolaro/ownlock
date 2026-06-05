@@ -92,11 +92,16 @@ There's one command — `ownlock import` — that handles every shape of `.env` 
 
 ```bash
 ownlock import                       # auto-discover .env / .env.local / etc in cwd
-ownlock import path/to/.env          # explicit file
-ownlock import -f .env -f .env.local # multiple files
+ownlock import path/to/.env          # one file
+ownlock import test.env .env         # multiple files (0.2+)
+ownlock import -f .env -f .env.local # same via -f
 ownlock import .env --rewrite        # plaintext: import, then rewrite file to vault(...)
-ownlock import .env --values-from values.json  # non-interactive bootstrap
+ownlock import .env --values-from values.json  # non-interactive vault-ref fill
 ```
+
+**Interactive pickers** (cyan numbered lists) show when you're in a TTY, did not pass `--yes`, and either several env files are selected or a single plaintext file has multiple keys. `--yes` skips all prompts. See [UPGRADE.md](UPGRADE.md#trying-import-locally-interactive-pickers) for examples.
+
+**Upgrading from 0.1.x?** See **[UPGRADE.md](UPGRADE.md)** — command renames (`auto`/`bootstrap` → `import`), vault/KDF upgrades, and migration checklist.
 
 `import` looks at the file and routes itself:
 
@@ -238,8 +243,11 @@ ownlock export --format docker
 
 ```bash
 ownlock rewrite-env -f .env   # rewrite an env file to use vault(...) without re-importing
-ownlock scan .                # search a directory for plaintext leaks of vault values
+ownlock scan .                # compare files against the project vault's secrets
+ownlock scan . --global       # compare against ~/.ownlock/vault.db instead
 ```
+
+`scan` walks the directory for plaintext copies of vault values. It uses the **project vault** (`.ownlock/vault.db` in cwd or a parent) when one exists; it does **not** silently fall back to your global vault — pass `--global` for that. Without a project vault, it still flags legacy `*.ownlock.bak` plaintext backups. Value comparison needs a vault with secrets and the correct passphrase (`OWNLOCK_PASSPHRASE` or keyring).
 
 `rewrite-env` is useful when you've already populated the vault (e.g. via `ownlock set`) and just want to swap an existing `.env` over to references. For a fresh project, `ownlock import .env --rewrite` does both steps in one go.
 
@@ -268,41 +276,7 @@ ownlock render -e production        # override vault env
 
 Rendered outputs are written atomically and (on POSIX) with mode `0600`. ownlock refuses to write a rendered file unless it appears in `.gitignore` — pass `--force` to override. The gitignore check uses `git check-ignore` when git is installed (so negation, anchored patterns, nested `.gitignore`, and `.git/info/exclude` are all honored); it falls back to a best-effort fnmatch scan otherwise.
 
-### Format-aware escaping
-
-Vault values are **escaped for the output file's format** so a password like `p@ss"w\nord` can't break JSON, inject XML structure, or trip up an INI parser. The format is auto-detected from the rendered file's extension:
-
-| Extension(s)                                                | Format  | Escape behavior                                    |
-|-------------------------------------------------------------|---------|----------------------------------------------------|
-| `.json` `.jsonc` `.toml` `.yaml` `.yml` `.tf` `.tfvars`     | `json`* | JSON string-literal escaping (`"`, `\`, control chars) |
-| `.xml` `.config` `.xaml` `.csproj` `.resx`                  | `xml`   | XML entity escaping (`& < > " '`)                  |
-| `.ini` `.cfg` `.properties`                                 | `ini`   | Java .properties escaping (`\`, `\n`, `\r`, `\t`)  |
-| `.env` `.envrc`                                             | `env`   | Escape for inside `"..."` in a dotenv              |
-| `.sh` `.bash` `.zsh`                                        | `shell` | Escape for inside `'...'` in a POSIX shell         |
-| anything else                                               | `raw`   | Verbatim (no escaping)                             |
-
-<sup>*TOML, YAML (double-quoted), and HCL all use the same string-literal semantics as JSON, so a single escaper covers them.</sup>
-
-The value is always inserted **inside** your existing quotes — you still write the quote characters in the template, and ownlock produces something safe to live there:
-
-```json
-// appsettings.Development.template.json  (template)
-{ "ConnectionStrings": { "Default": "{{vault("db-conn")}}" } }
-```
-
-```json
-// appsettings.Development.json  (rendered; secret was: Server=db;Password=p"w;)
-{ "ConnectionStrings": { "Default": "Server=db;Password=p\"w;" } }
-```
-
-Per-reference overrides win over auto-detection. Use them when a single file mixes formats (e.g. a shell script that emits JSON) or when you want to opt a single reference out of escaping:
-
-```hcl
-terraform = "{{vault("token", format="json")}}"      # force JSON escaping
-passthrough = "{{vault("blob", format="raw")}}"     # no escaping for this ref
-```
-
-Pass `--raw` to disable auto-escaping entirely and insert values verbatim (the pre-0.1.10 behavior). You probably don't want this unless you're rendering into a format ownlock doesn't understand and you've already handled quoting yourself.
+Rendered values are inserted so the output file stays syntactically valid for common config formats. Use `format="..."` on a single `{{vault(...)}}` reference or pass `--raw` when you handle quoting yourself. See `ownlock render --help` for flags.
 
 For legacy .NET apps, the least invasive pattern is `configSource` on `web.config`:
 
@@ -356,7 +330,7 @@ Example: `web.config` stays untouched and relies on standard transforms for `Log
 | `ownlock rekey` | Re-encrypt at current KDF (`--upgrade-kdf`) and/or rotate passphrase (`--rotate-passphrase`) |
 | `ownlock run -- CMD` | Resolve `.env`, inject secrets, redact stdout |
 | `ownlock export` | Print resolved KEY=VALUE pairs (`--example` emits `KEY=vault("KEY")` lines from vault names only) |
-| `ownlock import [FILE]` | Get secrets into the vault. Auto-detects plaintext vs. `vault(...)` references. `--rewrite` to also convert the file. `--values-from JSON` for non-interactive bootstrap |
+| `ownlock import [FILE...]` | Get secrets into the vault. Auto-detects plaintext vs. `vault(...)` references. `--rewrite` to also convert the file. `--values-from JSON` for non-interactive vault-ref fill |
 | `ownlock share KEYS -o FILE` | Export an encrypted bundle for a teammate (separate bundle passphrase) |
 | `ownlock import-share FILE` | Import an encrypted bundle into the local vault |
 | `ownlock rewrite-env` | Rewrite an existing env file to use `vault(...)` (without re-importing) |

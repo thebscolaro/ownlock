@@ -15,7 +15,7 @@ from ownlock.cli import app
 from ownlock.vault import VaultManager
 
 PASSPHRASE = "audit-pp"
-runner = CliRunner()
+runner = CliRunner(env={"OWNLOCK_PASSPHRASE": PASSPHRASE})
 
 
 @pytest.fixture()

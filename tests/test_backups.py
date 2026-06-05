@@ -9,6 +9,7 @@ import pytest
 
 from ownlock.backups import (
     LEGACY_BACKUP_SUFFIX,
+    _chmod_0600,
     backup_dir_for,
     backup_vault_file,
     write_env_backup,
@@ -92,6 +93,26 @@ def test_backup_vault_file_writes_under_backups_dir(tmp_path: Path) -> None:
     assert backup.read_bytes() == b"sqlite-bytes-here"
     if os.name == "posix":
         assert backup.stat().st_mode & 0o777 == 0o600
+
+
+def test_chmod_0600_skips_non_posix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(os, "name", "nt")
+    called = False
+
+    def fake_chmod(*args: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(os, "chmod", fake_chmod)
+    _chmod_0600(tmp_path / "x")
+    assert called is False
+
+
+def test_chmod_0600_ignores_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX only")
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: (_ for _ in ()).throw(OSError(1)))
+    _chmod_0600(tmp_path / "file")
 
 
 def test_backup_vault_file_includes_wal_and_shm_sidecars(tmp_path: Path) -> None:

@@ -96,8 +96,24 @@ def scan_directory(
     *secrets* is a ``{name: value}`` map of decrypted vault entries. The
     scanner returns a structured :class:`ScanResult` instead of printing —
     callers (CLI / pre-commit) format it however they like.
+
+    Legacy ``*.ownlock.bak`` files are always collected, even when *secrets*
+    is empty — those backups may contain rotated secrets the live vault no
+    longer holds.
     """
     result = ScanResult()
+
+    for file_path in directory.rglob("*"):
+        try:
+            rel = file_path.relative_to(directory)
+            depth = len(rel.parts) - 1 if rel.parts else 0
+        except ValueError:
+            depth = 0
+        if depth > max_depth or not file_path.is_file():
+            continue
+        if file_path.name.endswith(LEGACY_BACKUP_SUFFIX) and not _should_skip_path(file_path):
+            result.legacy_backups.append(file_path)
+
     if not secrets:
         return result
 
@@ -116,14 +132,8 @@ def scan_directory(
             continue
         if _should_skip_path(file_path):
             continue
-
-        # Plaintext backup written by older ownlock versions: flag and skip
-        # the value-scan (the file may be the only place a now-rotated
-        # secret still lives, so flagging by filename is the right signal).
         if file_path.name.endswith(LEGACY_BACKUP_SUFFIX):
-            result.legacy_backups.append(file_path)
             continue
-
         if file_path.suffix in _SKIP_EXTENSIONS:
             continue
 

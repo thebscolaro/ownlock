@@ -100,6 +100,16 @@ class TestTokenFormat:
         token = encrypt_name("MY_SECRET", PASSPHRASE)
         assert decrypt_name(token, PASSPHRASE) == "MY_SECRET"
 
+    def test_derive_key_accepts_bytearray_passphrase(self):
+        buf = bytearray(b"test-pass")
+        token = encrypt("x", buf)
+        assert decrypt(token, buf) == "x"
+
+    def test_derive_key_accepts_bytes_passphrase(self):
+        raw = b"test-pass"
+        token = encrypt("payload", raw)
+        assert decrypt(token, raw) == "payload"
+
     def test_rejects_absurd_iteration_count_in_v2_token(self):
         """Corrupt tokens must not trigger unbounded PBKDF2 work."""
         raw = b"v2" + (99_999_999).to_bytes(4, "big") + os.urandom(SALT_LEN + NONCE_LEN + 32)
