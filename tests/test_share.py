@@ -103,6 +103,14 @@ class TestBundleAPI:
         with pytest.raises(ValueError, match="missing required"):
             import_bundle(json.dumps(bundle), BUNDLE_PP)
 
+    def test_excessive_kdf_iterations_rejected(self):
+        import json
+
+        bundle = json.loads(export_bundle([], BUNDLE_PP))
+        bundle["kdf_iterations"] = 9_999_999
+        with pytest.raises(ValueError, match="Invalid KDF iteration count"):
+            import_bundle(json.dumps(bundle), BUNDLE_PP)
+
     def test_malformed_secret_entry_rejected(self):
         import base64
         import json

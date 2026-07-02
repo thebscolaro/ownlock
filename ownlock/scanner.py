@@ -102,6 +102,7 @@ def scan_directory(
     longer holds.
     """
     result = ScanResult()
+    scan_values = bool(secrets)
 
     for file_path in directory.rglob("*"):
         try:
@@ -111,24 +112,13 @@ def scan_directory(
             depth = 0
         if depth > max_depth or not file_path.is_file():
             continue
-        if file_path.name.endswith(LEGACY_BACKUP_SUFFIX) and not _should_skip_path(file_path):
+
+        if file_path.name.endswith(LEGACY_BACKUP_SUFFIX) and not _should_skip_path(
+            file_path
+        ):
             result.legacy_backups.append(file_path)
 
-    if not secrets:
-        return result
-
-    for file_path in directory.rglob("*"):
-        if result.files_scanned >= max_files:
-            break
-
-        try:
-            rel = file_path.relative_to(directory)
-            depth = len(rel.parts) - 1 if rel.parts else 0
-        except ValueError:
-            depth = 0
-        if depth > max_depth:
-            continue
-        if not file_path.is_file():
+        if not scan_values or result.files_scanned >= max_files:
             continue
         if _should_skip_path(file_path):
             continue
@@ -149,9 +139,10 @@ def scan_directory(
         except (OSError, UnicodeDecodeError):
             continue
 
+        lines = content.splitlines()
         for secret_name, secret_value in secrets.items():
             if secret_value and secret_value in content:
-                for i, line in enumerate(content.splitlines(), 1):
+                for i, line in enumerate(lines, 1):
                     if secret_value in line:
                         result.findings.append(
                             ScanFinding(

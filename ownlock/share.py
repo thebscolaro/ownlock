@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ownlock.crypto import (
     KDF_ITERATIONS_CURRENT,
+    MAX_KDF_ITERATIONS,
     NONCE_LEN,
     SALT_LEN,
     derive_key,
@@ -100,6 +101,9 @@ def import_bundle(text: str, passphrase: str) -> list[dict[str, str]]:
         iterations = int(bundle["kdf_iterations"])
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"Bundle missing required field or malformed: {e}") from e
+
+    if iterations <= 0 or iterations > MAX_KDF_ITERATIONS:
+        raise ValueError("Invalid KDF iteration count in bundle")
 
     key = derive_key(passphrase, salt, iterations)
     payload = AESGCM(key).decrypt(nonce, ciphertext, None)

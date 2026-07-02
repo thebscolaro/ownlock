@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ownlock.redactor import SecretRedactor
+from ownlock.redactor import CommandNotFoundError, SecretRedactor
 
 
 class TestRedact:
@@ -167,3 +167,13 @@ class TestRunProcess:
             )
         assert exit_code == 0
         assert "ok" in out.getvalue()
+
+    def test_command_not_found_raises(self) -> None:
+        r = SecretRedactor({})
+        with pytest.raises(CommandNotFoundError, match="missing-cmd"):
+            r.run_process(
+                ["missing-cmd"],
+                env={},
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )

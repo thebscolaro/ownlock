@@ -23,6 +23,7 @@ from ownlock.backups import (
     backup_dir_for as _backup_dir_for,
     backup_vault_file as _backup_vault_file,
     write_env_backup as _write_env_backup_impl,
+    write_private_text as _write_private_text,
 )
 from ownlock.doctor import gather_doctor_state as _gather_doctor_state
 from ownlock.envfile import (
@@ -38,6 +39,7 @@ from ownlock.keyring_util import (
     prompt_passphrase_session,
     store_passphrase,
 )
+from ownlock.redactor import CommandNotFoundError
 from ownlock.passphrase import PassphraseInput
 from ownlock.paths import (
     OWNLOCK_GITIGNORE_ENTRY,
@@ -102,7 +104,10 @@ def _safe_command(fn: F) -> F:
                 msg = str(e.args[0]) if e.args else "Secret not found in vault."
                 console.print(f"[red]{msg}[/red]")
                 raise typer.Exit(1)
-            console.print("[red]An error occurred.[/red]")
+            if isinstance(e, CommandNotFoundError):
+                console.print(f"[red]Command not found: {e.command}[/red]")
+                raise typer.Exit(127)
+            console.print(f"[red]An error occurred: {type(e).__name__}: {e}[/red]")
             raise typer.Exit(1)
 
     return wrapper  # type: ignore[return-value]
@@ -200,6 +205,28 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from ownlock import __version__
+
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
+    """Lightweight secrets manager — encrypted vault, env injection, stdout redaction."""
 
 
 def _offer_import_after_init(vault_path: Path, passphrase: PassphraseInput) -> None:
@@ -594,7 +621,11 @@ def rekey(
                 console.print(f"[bold]Vault[/bold]: {_format_vault_path(vault_path)}")
                 console.print(
                     f"  schema:        v{schema}"
-                    + ("" if schema == 2 else "  [yellow](current: v2)[/yellow]")
+                    + (
+                        ""
+                        if schema == SCHEMA_VERSION_CURRENT
+                        else f"  [yellow](current: v{SCHEMA_VERSION_CURRENT})[/yellow]"
+                    )
                 )
                 console.print(
                     f"  kdf:           {meta.get('kdf_algo', 'PBKDF2-HMAC-SHA256')}, "
@@ -1694,12 +1725,7 @@ def share(
             raise typer.Exit(1)
 
     bundle_text = export_bundle(decrypted, bundle_pp)
-    output.write_text(bundle_text, encoding="utf-8")
-    if os.name == "posix":
-        try:
-            os.chmod(output, 0o600)
-        except OSError:
-            pass
+    _write_private_text(output, bundle_text)
 
     audit.record(
         "share",
