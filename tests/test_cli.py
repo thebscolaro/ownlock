@@ -993,6 +993,26 @@ class TestRun:
         )
         assert result.exit_code == 0
 
+    def test_run_command_not_found_exits_127(self, tmp_path, vault_db):
+        VaultManager.init_vault(vault_db, PASSPHRASE).close()
+        env_file = tmp_path / ".env"
+        env_file.write_text("X=plain\n")
+        result = runner.invoke(
+            app,
+            ["run", "-f", str(env_file), "--", "ownlock-nonexistent-command-xyz"],
+        )
+        assert result.exit_code == 127
+        assert "Command not found" in result.output
+
+
+class TestVersion:
+    def test_version_flag_prints_package_version(self):
+        from importlib.metadata import version as pkg_version
+
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert result.output.strip() == pkg_version("ownlock")
+
 
 class TestInstallHook:
     """ownlock install-hook: pre-commit framework + raw git hook modes."""

@@ -29,6 +29,14 @@ _OWNLOCK_INTERNAL_ENV_VARS = frozenset({
 })
 
 
+class CommandNotFoundError(Exception):
+    """Raised when ``ownlock run`` cannot execute the requested command."""
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        super().__init__(command)
+
+
 def _sanitize_parent_env(parent: dict[str, str]) -> dict[str, str]:
     """Return *parent* env with ownlock-internal variables removed."""
     return {k: v for k, v in parent.items() if k not in _OWNLOCK_INTERNAL_ENV_VARS}
@@ -162,14 +170,19 @@ class SecretRedactor:
         merged_env = {**_sanitize_parent_env(os.environ), **env}
         cmd_resolved = _resolve_cmd_for_subprocess(cmd, merged_env)
 
-        proc = subprocess.Popen(
-            cmd_resolved,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=merged_env,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd_resolved,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=merged_env,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            raise CommandNotFoundError(
+                cmd_resolved[0] if cmd_resolved else (cmd[0] if cmd else "")
+            ) from None
 
         t1 = threading.Thread(
             target=self._stream_reader,

@@ -37,9 +37,10 @@ KEY_LEN = 32
 #     for PBKDF2-SHA256.
 KDF_ITERATIONS_LEGACY = 200_000
 KDF_ITERATIONS_CURRENT = 600_000
-# Sanity cap for v2 tokens — rejects corrupt/malicious DB rows that would
-# trigger unbounded PBKDF2 work on every get/decrypt.
-_MAX_KDF_ITERATIONS = 2_000_000
+# Sanity cap for v2 tokens and share bundles — rejects corrupt/malicious rows
+# that would trigger unbounded PBKDF2 work on every get/decrypt.
+MAX_KDF_ITERATIONS = 2_000_000
+_MAX_KDF_ITERATIONS = MAX_KDF_ITERATIONS
 
 # Domain-separated salt for deriving the HMAC key used to index secrets by
 # (name, env) without storing plaintext names in SQLite.

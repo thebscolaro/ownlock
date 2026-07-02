@@ -39,14 +39,27 @@ def backup_dir_for(env_file: Path) -> Path:
     return Path.cwd() / PROJECT_VAULT_DIR / "backups"
 
 
-def _chmod_0600(path: Path) -> None:
-    """Best-effort tighten POSIX permissions; silent on systems that don't support it."""
-    if os.name != "posix":
-        return
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+def write_private_bytes(path: Path, data: bytes) -> None:
+    """Write *data* to *path* with mode 0600 on POSIX from file creation."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    else:
+        path.write_bytes(data)
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Write *text* to *path* with mode 0600 on POSIX from file creation."""
+    write_private_bytes(path, text.encode("utf-8"))
 
 
 def write_env_backup(env_file: Path, content: str, *, ensure_gitignore_fn: object) -> Path:
@@ -59,11 +72,9 @@ def write_env_backup(env_file: Path, content: str, *, ensure_gitignore_fn: objec
     if callable(ensure_gitignore_fn):
         ensure_gitignore_fn()
     backup_dir = backup_dir_for(env_file)
-    backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup_path = backup_dir / f"{env_file.name}.{timestamp}.bak"
-    backup_path.write_text(content, encoding="utf-8")
-    _chmod_0600(backup_path)
+    write_private_text(backup_path, content)
     return backup_path
 
 
@@ -82,17 +93,14 @@ def backup_vault_file(vault_path: Path) -> Path:
     too — restoring the main file alone would lose those writes.
     """
     backup_dir = vault_path.parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup_path = backup_dir / f"{vault_path.name}.backup-{timestamp}"
-    backup_path.write_bytes(vault_path.read_bytes())
-    _chmod_0600(backup_path)
+    write_private_bytes(backup_path, vault_path.read_bytes())
 
     for suffix in ("-wal", "-shm"):
         sidecar = vault_path.with_name(vault_path.name + suffix)
         if sidecar.exists():
             sidecar_backup = backup_dir / f"{sidecar.name}.backup-{timestamp}"
-            sidecar_backup.write_bytes(sidecar.read_bytes())
-            _chmod_0600(sidecar_backup)
+            write_private_bytes(sidecar_backup, sidecar.read_bytes())
 
     return backup_path
