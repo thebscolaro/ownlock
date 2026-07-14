@@ -39,6 +39,7 @@ from ownlock.keyring_util import (
     prompt_passphrase_session,
     store_passphrase,
 )
+from ownlock.policy import VALID_POLICIES, check_policy_access, normalize_policy
 from ownlock.redactor import CommandNotFoundError
 from ownlock.passphrase import PassphraseInput
 from ownlock.paths import (
@@ -103,6 +104,9 @@ def _safe_command(fn: F) -> F:
             if isinstance(e, KeyError) and e.args:
                 msg = str(e.args[0]) if e.args else "Secret not found in vault."
                 console.print(f"[red]{msg}[/red]")
+                raise typer.Exit(1)
+            if isinstance(e, PermissionError):
+                console.print(f"[red]{e}[/red]")
                 raise typer.Exit(1)
             if isinstance(e, CommandNotFoundError):
                 console.print(f"[red]Command not found: {e.command}[/red]")
@@ -341,6 +345,7 @@ def _init_project_vault(project_path: Path) -> None:
                 f"{_format_vault_path(GLOBAL_VAULT_PATH)} also created)[/dim]"
             )
             _offer_import_after_init(project_path, pp)
+            _offer_team_bundle_import(project_path, pp)
     else:
         with passphrase_session() as pp:
             VaultManager.init_vault(project_path, pp).close()
@@ -350,6 +355,58 @@ def _init_project_vault(project_path: Path) -> None:
                 f"[green]Vault created at {_format_vault_path(project_path)}[/green]"
             )
             _offer_import_after_init(project_path, pp)
+            _offer_team_bundle_import(project_path, pp)
+
+
+def _offer_team_bundle_import(vault_path: Path, passphrase: PassphraseInput) -> None:
+    """Import secrets from ``.ownlock/team.olbundle`` when present after init."""
+    from ownlock.share import find_team_bundle, import_bundle
+
+    bundle_path = find_team_bundle(vault_path)
+    if bundle_path is None or not _is_tty():
+        return
+    if not typer.confirm(
+        f"Found team bundle at {bundle_path.name}. Import shared secrets now?",
+        default=True,
+    ):
+        console.print(
+            "[dim]Skipping team bundle. Run "
+            "[bold]ownlock import-share .ownlock/team.olbundle[/bold] later.[/dim]"
+        )
+        return
+    bundle_pp = _resolve_bundle_passphrase(confirm=True)
+    try:
+        entries = import_bundle(bundle_path.read_text(encoding="utf-8"), bundle_pp)
+    except Exception as e:
+        console.print(f"[red]Team bundle import failed: {e}[/red]")
+        return
+    imported = 0
+    with VaultManager(vault_path, passphrase) as vm:
+        for entry in entries:
+            try:
+                pol = _policy_from_bundle_entry(entry)
+            except ValueError as e:
+                console.print(f"[red]Team bundle import failed: {e}[/red]")
+                return
+            vm.set(entry["name"], entry["value"], entry["env"], policy=pol)
+            imported += 1
+    audit.record(
+        "import-share",
+        vault_path=vault_path,
+        extra={"bundle_path": str(bundle_path), "secrets_imported": imported, "team": True},
+    )
+    console.print(f"[green]Imported {imported} secret(s) from team bundle.[/green]")
+
+
+def _policy_from_bundle_entry(entry: dict) -> str:
+    """Normalize a bundle secret's policy.
+
+    Missing policy → ``open`` (older bundles). Present but invalid → error
+    (do not silently downgrade confirm/session to open).
+    """
+    if "policy" not in entry or entry.get("policy") in (None, ""):
+        return normalize_policy(None)
+    return normalize_policy(entry.get("policy"), strict=True)
 
 
 @app.command()
@@ -359,8 +416,16 @@ def init(
         "--global",
         help="Create global vault at ~/.ownlock/ (passphrase in keyring).",
     ),
+    project: bool = typer.Option(
+        False,
+        "--project",
+        help="Create project vault at ./.ownlock/ (default when --global is omitted).",
+    ),
 ) -> None:
     """Create a new vault, then offer to import an existing .env if one is present."""
+    if global_vault and project:
+        console.print("[red]Use either --global or --project, not both.[/red]")
+        raise typer.Exit(1)
     if global_vault:
         _init_global_vault()
         return
@@ -429,6 +494,14 @@ def set_secret(
         "--strip/--no-strip",
         help="With --from-file or --editor: strip a single trailing newline from the value.",
     ),
+    policy: str = typer.Option(
+        "open",
+        "--policy",
+        help=(
+            "Access policy: open (default), session (unlock ~30 minutes across "
+            "CLI invocations), confirm (prompt each time; Enter declines)."
+        ),
+    ),
 ) -> None:
     """Store a secret in the vault.
 
@@ -470,12 +543,16 @@ def set_secret(
         console.print("[red]Name and value cannot be empty.[/red]")
         raise typer.Exit(1)
     _validate_secret_name(name)
+    pol = normalize_policy(policy)
+    if policy not in VALID_POLICIES:
+        console.print(f"[red]Invalid policy '{policy}'. Use: open, session, confirm.[/red]")
+        raise typer.Exit(1)
 
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
 
     with passphrase_session() as passphrase:
         with VaultManager(vault_path, passphrase) as vm:
-            vm.set(name, value, env)
+            vm.set(name, value, env, policy=pol)
 
     audit.record("set", vault_path=vault_path, name=name, env=env)
     console.print(f"[green]Secret '{name}' stored (env={env}).[/green]")
@@ -494,6 +571,10 @@ def get_secret(
 
     with passphrase_session() as passphrase:
         with VaultManager(vault_path, passphrase) as vm:
+            pol = vm.get_policy(name, env)
+            if not check_policy_access(name, env, pol, is_tty=_is_tty()):
+                console.print(f"[red]Access denied for secret '{name}' (env={env}).[/red]")
+                raise typer.Exit(1)
             value = vm.get(name, env)
 
     if value is None:
@@ -927,7 +1008,11 @@ def render(
                 text = src.read_text(encoding="utf-8")
                 default_format = "raw" if raw else detect_format(dst)
                 new_text, refs = render_text(
-                    text, lookup, default_env=env, default_format=default_format
+                    text,
+                    lookup,
+                    default_env=env,
+                    default_format=default_format,
+                    is_tty=_is_tty(),
                 )
                 if refs == 0:
                     console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
@@ -1012,7 +1097,11 @@ def _render_explicit_templates(
             text = src.read_text(encoding="utf-8")
             default_format = "raw" if raw else detect_format(dst)
             new_text, refs = render_text(
-                text, lookup, default_env=default_env, default_format=default_format
+                text,
+                lookup,
+                default_env=default_env,
+                default_format=default_format,
+                is_tty=_is_tty(),
             )
             if refs == 0:
                 console.print(f"[dim]{src}: no vault() references; skipping.[/dim]")
@@ -1302,9 +1391,13 @@ def _import_vault_refs_flow(
                     ref_env,
                     project=project_bool,
                     use_global=global_bool,
+                    is_tty=_is_tty(),
                 )
             except KeyError:
                 missing.append(ref)
+            except PermissionError:
+                # Secret exists but policy blocked this non-interactive check.
+                pass
 
     if not missing:
         console.print(
@@ -1666,8 +1759,8 @@ def share(
         None,
         help="Secret names to include. Omit to share every secret.",
     ),
-    output: Path = typer.Option(
-        ..., "-o", "--output", help="Where to write the encrypted bundle file."
+    output: Optional[Path] = typer.Option(
+        None, "-o", "--output", help="Where to write the encrypted bundle file (not needed with --team)."
     ),
     env: Optional[str] = typer.Option(
         None,
@@ -1678,6 +1771,11 @@ def share(
     global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
     project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+    team: bool = typer.Option(
+        False,
+        "--team",
+        help="Write git-committable bundle to .ownlock/team.olbundle (project vault only).",
+    ),
 ) -> None:
     """Export secrets into an encrypted bundle for a teammate.
 
@@ -1688,9 +1786,26 @@ def share(
 
     Reads ``OWNLOCK_BUNDLE_PASSPHRASE`` if set (for non-interactive use).
     """
-    from ownlock.share import export_bundle
+    from ownlock.share import export_bundle, write_team_bundle
 
-    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    if team and global_vault:
+        console.print("[red]--team requires a project vault (omit --global).[/red]")
+        raise typer.Exit(1)
+    if team:
+        # Never fall back to ~/.ownlock — team bundles belong in the repo.
+        vault_path = Path.cwd() / PROJECT_VAULT_DIR / PROJECT_VAULT_DB
+        if not _vault_exists(vault_path):
+            console.print(
+                "[red]--team requires a project vault. Run [bold]ownlock init[/bold] first.[/red]"
+            )
+            raise typer.Exit(1)
+        out_path = vault_path.parent / "team.olbundle"
+    else:
+        vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+        if output is None:
+            console.print("[red]--output is required unless --team is set.[/red]")
+            raise typer.Exit(1)
+        out_path = output
 
     with passphrase_session() as passphrase:
         with VaultManager(vault_path, passphrase) as vm:
@@ -1703,7 +1818,12 @@ def share(
                 if value is None:
                     continue
                 decrypted.append(
-                    {"name": row["name"], "env": row["env"], "value": value}
+                    {
+                        "name": row["name"],
+                        "env": row["env"],
+                        "value": value,
+                        "policy": row.get("policy", "open"),
+                    }
                 )
 
     if not decrypted:
@@ -1719,27 +1839,37 @@ def share(
 
     if _is_tty() and not yes and not os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE"):
         if not typer.confirm(
-            f"Export {len(decrypted)} secret(s) to {output}?", default=True
+            f"Export {len(decrypted)} secret(s) to {out_path}?", default=True
         ):
             console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(1)
 
     bundle_text = export_bundle(decrypted, bundle_pp)
-    _write_private_text(output, bundle_text)
+    if team:
+        out_path = write_team_bundle(vault_path, bundle_text)
+    else:
+        _write_private_text(output, bundle_text)
+        out_path = output
 
     audit.record(
         "share",
         vault_path=vault_path,
         extra={
-            "bundle_path": str(output),
+            "bundle_path": str(out_path),
             "secrets_exported": len(decrypted),
             "names": sorted({s["name"] for s in decrypted}),
+            "team": team,
         },
     )
     console.print(
-        f"[green]Wrote {len(decrypted)} secret(s) to {output} "
+        f"[green]Wrote {len(decrypted)} secret(s) to {out_path} "
         "(encrypted, mode 0600 on POSIX).[/green]"
     )
+    if team:
+        console.print(
+            "[dim]Commit .ownlock/team.olbundle and share the bundle passphrase "
+            "out of band. Teammates get secrets on `ownlock init`.[/dim]"
+        )
 
 
 @app.command("import-share")
@@ -1833,7 +1963,12 @@ def import_share(
 
         with VaultManager(vault_path, passphrase) as vm:
             for entry in secrets:
-                vm.set(entry["name"], entry["value"], entry["env"])
+                try:
+                    pol = _policy_from_bundle_entry(entry)
+                except ValueError as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
+                vm.set(entry["name"], entry["value"], entry["env"], policy=pol)
 
         audit.record(
             "import-share",
@@ -1992,5 +2127,148 @@ def scan(
         console.print("[green]No leaked secrets found.[/green]")
     else:
         console.print("[dim]No legacy backup files found.[/dim]")
+
+
+@app.command()
+@_safe_command
+def shield(
+    directory: Path = typer.Argument(Path("."), help="Project directory to harden."),
+    verify: bool = typer.Option(False, "--verify", help="Verify shield installation."),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite hook scripts."),
+) -> None:
+    """Harden a repo against AI agents reading secrets on disk."""
+    from ownlock.shield import install_shield, simulate_agent_env_read, verify_shield
+
+    if verify:
+        issues = verify_shield(directory)
+        leak = simulate_agent_env_read(directory)
+        if leak:
+            issues.append(leak)
+        if issues:
+            for issue in issues:
+                console.print(f"[red]✗ {issue}[/red]")
+            raise typer.Exit(1)
+        console.print("[green]Shield verified — agent secret reads blocked.[/green]")
+        return
+
+    results = install_shield(directory, force=force)
+    any_changed = False
+    for path, changed in results.items():
+        if changed:
+            any_changed = True
+            console.print(f"[green]Updated {path}[/green]")
+    if not any_changed:
+        console.print("[dim]Shield already up to date.[/dim]")
+    else:
+        console.print("[dim]Run [bold]ownlock shield --verify[/bold] to self-test.[/dim]")
+
+
+@app.command()
+@_safe_command
+def guard(
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read stdin, redact known vault secrets, write stdout (for hooks).",
+    ),
+    install_hook: bool = typer.Option(
+        False,
+        "--install-hook",
+        help="Install Claude Code PostToolUse hook for output redaction.",
+    ),
+    directory: Path = typer.Option(
+        Path("."),
+        "--directory",
+        "-C",
+        help="Project directory for --install-hook.",
+    ),
+    env: Optional[str] = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="Vault environment for --stdin (default: all environments).",
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite guard hook script."),
+) -> None:
+    """Redact secret values from agent tool output (DLP guard)."""
+    from ownlock.guard import guard_stdin, install_guard_hook
+
+    if install_hook:
+        if install_guard_hook(directory, force=force):
+            console.print("[green]Installed PostToolUse guard hook.[/green]")
+        else:
+            console.print("[dim]Guard hook already up to date.[/dim]")
+        return
+
+    if stdin:
+        vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+        with passphrase_session() as passphrase:
+            with VaultManager(vault_path, passphrase) as vm:
+                secrets = vm.get_all_decrypted(env)
+        raise typer.Exit(guard_stdin(secrets))
+
+    console.print("[red]Use --stdin or --install-hook.[/red]")
+    raise typer.Exit(1)
+
+
+@app.command()
+@_safe_command
+def status(
+    env: Optional[str] = typer.Option(None, "--env", "-e"),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    as_json: bool = typer.Option(False, "--json", help="Print machine-readable summary."),
+) -> None:
+    """Show vault, agent-safety, and audit posture for the current project."""
+    from ownlock.agent import detect_agent_actor
+    from ownlock.shield import verify_shield
+
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    # Always evaluate shield for the cwd project — never $HOME when using global vault.
+    project_dir = Path.cwd()
+
+    agent = detect_agent_actor()
+    shield_issues = verify_shield(project_dir)
+    audit_on = audit.is_enabled()
+
+    secret_count = 0
+    environments: list[str] = []
+    if _vault_exists(vault_path):
+        with passphrase_session() as passphrase:
+            with VaultManager(vault_path, passphrase) as vm:
+                rows = vm.list_secrets(env)
+                secret_count = len(rows)
+                environments = sorted({r["env"] for r in rows})
+
+    payload = {
+        "vault_path": str(vault_path),
+        "vault_exists": _vault_exists(vault_path),
+        "secret_count": secret_count,
+        "environments": environments,
+        "agent_detected": agent,
+        "audit_enabled": audit_on,
+        "shield_ok": len(shield_issues) == 0,
+        "shield_issues": shield_issues,
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    console.print(f"[bold]Vault[/bold]: {_format_vault_path(vault_path)}")
+    console.print(f"  Secrets: {secret_count}")
+    if environments:
+        console.print(f"  Environments: {', '.join(environments)}")
+    console.print(f"[bold]Agent[/bold]: {agent or 'none detected'}")
+    console.print(f"[bold]Audit[/bold]: {'on' if audit_on else 'off'}")
+    if shield_issues:
+        console.print("[bold yellow]Shield[/bold yellow]: incomplete")
+        for issue in shield_issues:
+            console.print(f"  [yellow]• {issue}[/yellow]")
+        console.print("[dim]Run [bold]ownlock shield[/bold] to fix.[/dim]")
+    else:
+        console.print("[bold green]Shield[/bold green]: ok")
 
 

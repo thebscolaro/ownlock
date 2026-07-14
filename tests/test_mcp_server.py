@@ -231,3 +231,31 @@ def test_ownlock_doctor_does_not_decrypt() -> None:
         # Must call subprocess, never crypto/vault directly.
         assert mock.called
         assert mock.call_args[0][0][0] == "doctor"
+
+
+def test_ownlock_request_access_approved(mock_run: MagicMock) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout="secret\n", stderr="")
+    out = mcp_server.ownlock_request_access(
+        "API_KEY", env="prod", reason="deploy", project=True
+    )
+    assert out["approved"] is True
+    assert out["secret_name"] == "API_KEY"
+    args = mock_run.call_args[0][0]
+    assert args[:4] == ["get", "API_KEY", "--env", "prod"]
+    assert "--project" in args
+
+
+def test_ownlock_request_access_denied(mock_run: MagicMock) -> None:
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Access denied")
+    out = mcp_server.ownlock_request_access("API_KEY")
+    assert out["approved"] is False
+    assert "Access denied" in out["error"]
+
+
+def test_ownlock_request_access_timeout(mock_run: MagicMock) -> None:
+    import subprocess
+
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd="ownlock", timeout=1)
+    out = mcp_server.ownlock_request_access("API_KEY", global_vault=True)
+    assert out["approved"] is False
+    assert "error" in out
