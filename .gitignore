@@ -1,5 +1,6 @@
-# Vault data
-.ownlock/
+# Vault data (allow encrypted team bundle to be committed)
+.ownlock/*
+!.ownlock/team.olbundle
 *.db
 
 .DS_Store
@@ -16,6 +17,7 @@ build/
 .pytest_cache/
 .coverage
 .coverage.json
+coverage.json
 .coverage-full.json
 htmlcov/
 htmlcov/

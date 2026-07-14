@@ -2,9 +2,9 @@
 
 Centralizes the rules ownlock applies to every backup it writes:
 
-* Backup directory is ``.ownlock/backups/`` so a single ``.gitignore`` entry
-  (added by :func:`ownlock.paths.ensure_gitignore`) covers everything ownlock
-  produces.
+* Backup directory is ``.ownlock/backups/`` so a single ``.gitignore`` pattern
+  (``.ownlock/*``, added by :func:`ownlock.paths.ensure_gitignore`) covers
+  everything ownlock produces while still allowing ``team.olbundle``.
 * On POSIX the file is mode ``0600`` (owner read/write only).
 * Backup names embed a UTC timestamp so repeated rewrites or rekeys leave a
   trail rather than clobbering each other.

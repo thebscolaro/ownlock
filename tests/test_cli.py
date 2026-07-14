@@ -90,7 +90,7 @@ class TestInit:
         assert "no keyring backend" in result.output
 
     def test_init_creates_gitignore(self, tmp_path, monkeypatch):
-        """ownlock init creates .gitignore with .ownlock/ when none exists."""
+        """ownlock init creates .gitignore with .ownlock/* when none exists."""
         monkeypatch.chdir(tmp_path)
         project_vault = tmp_path / ".ownlock" / "vault.db"
         monkeypatch.setattr(
@@ -103,10 +103,12 @@ class TestInit:
         assert project_vault.exists()
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
-        assert ".ownlock" in gitignore.read_text()
+        text = gitignore.read_text()
+        assert ".ownlock/*" in text
+        assert "!.ownlock/team.olbundle" in text
 
     def test_init_appends_to_existing_gitignore(self, tmp_path, monkeypatch):
-        """ownlock init appends .ownlock/ to existing .gitignore."""
+        """ownlock init appends .ownlock/* to existing .gitignore."""
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.env\n")
@@ -120,12 +122,13 @@ class TestInit:
         assert result.exit_code == 0
         content = gitignore.read_text()
         assert "node_modules/" in content
-        assert ".ownlock" in content
+        assert ".ownlock/*" in content
+        assert "!.ownlock/team.olbundle" in content
 
-    def test_init_skips_gitignore_when_ownlock_already_present(
+    def test_init_migrates_dir_gitignore_and_allows_team_bundle(
         self, tmp_path, monkeypatch
     ):
-        """ownlock init does not duplicate .ownlock if already in .gitignore."""
+        """Legacy .ownlock/ is kept; .ownlock/* is added so negation works."""
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.ownlock/\n")
@@ -138,7 +141,19 @@ class TestInit:
         result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         content = gitignore.read_text()
-        assert content.count(".ownlock") == 1
+        dir_lines = [ln for ln in content.splitlines() if ln.strip() == ".ownlock/"]
+        star_lines = [ln for ln in content.splitlines() if ln.strip() == ".ownlock/*"]
+        assert len(dir_lines) == 1
+        assert len(star_lines) == 1
+        assert "!.ownlock/team.olbundle" in content
+
+        result2 = runner.invoke(app, ["init"])
+        assert result2.exit_code == 0
+        assert gitignore.read_text().count("!.ownlock/team.olbundle") == 1
+        star_lines2 = [
+            ln for ln in gitignore.read_text().splitlines() if ln.strip() == ".ownlock/*"
+        ]
+        assert len(star_lines2) == 1
 
     def test_first_init_creates_global_and_project_vault(self, tmp_path, monkeypatch):
         """First ownlock init (no global vault yet) creates both global and project vault."""

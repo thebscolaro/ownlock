@@ -242,3 +242,31 @@ class TestSecretNames:
         env_file.write_text("A=1\nB=2\n")
         _, secret_names = resolve_env_file(env_file, PASSPHRASE)
         assert secret_names == []
+
+
+class TestExternalRefPolicy:
+    def test_external_ref_open_by_default(self, monkeypatch):
+        monkeypatch.delenv("OWNLOCK_EXTERNAL_POLICY", raising=False)
+        with patch(
+            "ownlock.providers.resolve_external_secret", return_value="sekret"
+        ):
+            with VaultLookup(PASSPHRASE) as lookup:
+                assert lookup.lookup("op://v/i/f", is_tty=False) == "sekret"
+
+    def test_external_ref_confirm_denies_non_tty(self, monkeypatch):
+        monkeypatch.setenv("OWNLOCK_EXTERNAL_POLICY", "confirm")
+        with VaultLookup(PASSPHRASE) as lookup:
+            with pytest.raises(PermissionError, match="requires confirmation"):
+                lookup.lookup("op://v/i/f", is_tty=False)
+
+    def test_lookup_default_is_tty_false_blocks_confirm(self, tmp_path, monkeypatch):
+        db = tmp_path / ".ownlock" / "vault.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("GATED", "value12345", policy="confirm")
+        monkeypatch.setattr(
+            "ownlock.resolver.VaultManager.find_project_vault",
+            staticmethod(lambda: db),
+        )
+        with VaultLookup(PASSPHRASE) as lookup:
+            with pytest.raises(PermissionError):
+                lookup.lookup("GATED")  # is_tty defaults to False

@@ -19,6 +19,7 @@ from ownlock.crypto import (
     token_iterations,
 )
 from ownlock.passphrase import Passphrase, PassphraseInput
+from ownlock.policy import POLICY_OPEN, normalize_policy
 
 GLOBAL_VAULT_DIR = Path.home() / ".ownlock"
 GLOBAL_VAULT_PATH = GLOBAL_VAULT_DIR / "vault.db"
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS secrets (
     name_enc    TEXT NOT NULL,
     env         TEXT NOT NULL DEFAULT 'default',
     value_enc   TEXT NOT NULL,
+    policy      TEXT NOT NULL DEFAULT 'open',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (name_lookup)
@@ -103,6 +105,7 @@ class VaultManager:
         self._conn.commit()
         self._ensure_meta(is_new=is_new)
         self._ensure_secrets_schema()
+        self._ensure_policy_column()
         if os.name == "posix" and self._db_path.exists():
             try:
                 os.chmod(self._db_path, 0o600)
@@ -248,6 +251,19 @@ class VaultManager:
         self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
         conn.commit()
 
+    def _ensure_policy_column(self) -> None:
+        """Add ``policy`` column to schema v3 vaults when missing."""
+        if not self._uses_encrypted_names():
+            return
+        cols = self._secrets_columns()
+        if "policy" in cols:
+            return
+        conn = self._require_conn()
+        conn.execute(
+            "ALTER TABLE secrets ADD COLUMN policy TEXT NOT NULL DEFAULT 'open'"
+        )
+        conn.commit()
+
     def get_meta(self) -> dict[str, str]:
         """Return the meta table as a plain dict.
 
@@ -282,25 +298,49 @@ class VaultManager:
             (key, value, value),
         )
 
-    def set(self, name: str, value: str, env: str = "default") -> None:
+    def set(
+        self,
+        name: str,
+        value: str,
+        env: str = "default",
+        *,
+        policy: str = POLICY_OPEN,
+    ) -> None:
         """Store or update a secret. New writes use the current KDF default."""
         conn = self._require_conn()
         now = datetime.now(UTC).isoformat()
         value_token = encrypt(value, self._pp(), iterations=KDF_ITERATIONS_CURRENT)
         lookup = secret_name_lookup(self._pp(), name, env)
         name_token = encrypt_name(name, self._pp())
+        pol = normalize_policy(policy)
         conn.execute(
             """INSERT INTO secrets
-               (name_lookup, name_enc, env, value_enc, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (name_lookup, name_enc, env, value_enc, policy, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (name_lookup) DO UPDATE SET
                  name_enc = excluded.name_enc,
                  env = excluded.env,
                  value_enc = excluded.value_enc,
+                 policy = excluded.policy,
                  updated_at = excluded.updated_at""",
-            (lookup, name_token, env, value_token, now, now),
+            (lookup, name_token, env, value_token, pol, now, now),
         )
         conn.commit()
+
+    def get_policy(self, name: str, env: str = "default") -> str:
+        """Return the access policy for a secret (``open`` if missing)."""
+        conn = self._require_conn()
+        lookup = secret_name_lookup(self._pp(), name, env)
+        cols = self._secrets_columns()
+        if "policy" not in cols:
+            return POLICY_OPEN
+        row = conn.execute(
+            "SELECT policy FROM secrets WHERE name_lookup = ?",
+            (lookup,),
+        ).fetchone()
+        if row is None:
+            return POLICY_OPEN
+        return normalize_policy(row["policy"])
 
     def get(self, name: str, env: str = "default") -> Optional[str]:
         """Retrieve and decrypt a secret. Returns None if not found."""
@@ -330,31 +370,48 @@ class VaultManager:
         conn = self._require_conn()
         if env:
             rows = conn.execute(
-                "SELECT name_enc, env, created_at, updated_at FROM secrets "
+                "SELECT name_enc, env, policy, created_at, updated_at FROM secrets "
                 "WHERE env = ? ORDER BY created_at",
                 (env,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT name_enc, env, created_at, updated_at FROM secrets "
+                "SELECT name_enc, env, policy, created_at, updated_at FROM secrets "
                 "ORDER BY created_at"
             ).fetchall()
+        has_policy = "policy" in self._secrets_columns()
         out: list[dict[str, str]] = []
         for row in rows:
-            out.append(
-                {
-                    "name": decrypt_name(row["name_enc"], self._pp()),
-                    "env": row["env"],
-                    "created_at": row["created_at"],
-                    "updated_at": row["updated_at"],
-                }
-            )
+            entry = {
+                "name": decrypt_name(row["name_enc"], self._pp()),
+                "env": row["env"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            if has_policy:
+                entry["policy"] = normalize_policy(row["policy"])
+            out.append(entry)
         out.sort(key=lambda r: (r["name"], r["env"]))
         return out
 
-    def get_all_decrypted(self, env: str = "default") -> dict[str, str]:
-        """Decrypt all secrets for an env. Used by the resolver."""
+    def get_all_decrypted(self, env: Optional[str] = "default") -> dict[str, str]:
+        """Decrypt secrets for *env*, or all environments when *env* is None.
+
+        When *env* is None, keys are ``name`` or ``name@env`` if the same name
+        appears in more than one environment (used by ``ownlock guard``).
+        """
         conn = self._require_conn()
+        if env is None:
+            rows = conn.execute(
+                "SELECT name_enc, env, value_enc FROM secrets"
+            ).fetchall()
+            out: dict[str, str] = {}
+            for row in rows:
+                name = decrypt_name(row["name_enc"], self._pp())
+                value = decrypt(row["value_enc"], self._pp())
+                key = name if name not in out else f"{name}@{row['env']}"
+                out[key] = value
+            return out
         rows = conn.execute(
             "SELECT name_enc, value_enc FROM secrets WHERE env = ?",
             (env,),
@@ -398,33 +455,47 @@ class VaultManager:
         to the current value. Returns the number of secrets re-encrypted.
         """
         conn = self._require_conn()
-        rows = conn.execute(
-            "SELECT name_lookup, name_enc, env, value_enc FROM secrets"
-        ).fetchall()
+        has_policy = "policy" in self._secrets_columns()
+        if has_policy:
+            rows = conn.execute(
+                "SELECT name_lookup, name_enc, env, value_enc, policy FROM secrets"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name_lookup, name_enc, env, value_enc FROM secrets"
+            ).fetchall()
 
-        re_enc: list[tuple[str, str, str, str, str, str]] = []
+        re_enc: list[tuple[str, str, str, str, str, str, str]] = []
         now = datetime.now(UTC).isoformat()
         for row in rows:
             name = decrypt_name(row["name_enc"], self._pp())
             env = row["env"]
             plaintext = decrypt(row["value_enc"], self._pp())
+            pol = normalize_policy(row["policy"]) if has_policy else POLICY_OPEN
             new_lookup = secret_name_lookup(new_passphrase, name, env)
             new_name_enc = encrypt_name(name, new_passphrase)
             new_value_enc = encrypt(
                 plaintext, new_passphrase, iterations=target_iterations
             )
             re_enc.append(
-                (new_lookup, new_name_enc, env, new_value_enc, now, row["name_lookup"])
+                (new_lookup, new_name_enc, env, new_value_enc, pol, now, row["name_lookup"])
             )
 
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for lookup, name_enc, env, value_enc, ts, old_lookup in re_enc:
-                conn.execute(
-                    """UPDATE secrets SET name_lookup = ?, name_enc = ?, env = ?,
-                       value_enc = ?, updated_at = ? WHERE name_lookup = ?""",
-                    (lookup, name_enc, env, value_enc, ts, old_lookup),
-                )
+            for lookup, name_enc, env, value_enc, pol, ts, old_lookup in re_enc:
+                if has_policy:
+                    conn.execute(
+                        """UPDATE secrets SET name_lookup = ?, name_enc = ?, env = ?,
+                           value_enc = ?, policy = ?, updated_at = ? WHERE name_lookup = ?""",
+                        (lookup, name_enc, env, value_enc, pol, ts, old_lookup),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE secrets SET name_lookup = ?, name_enc = ?, env = ?,
+                           value_enc = ?, updated_at = ? WHERE name_lookup = ?""",
+                        (lookup, name_enc, env, value_enc, ts, old_lookup),
+                    )
             self._upsert_meta_row("schema_version", str(SCHEMA_VERSION_CURRENT))
             self._upsert_meta_row("kdf_iterations", str(target_iterations))
             conn.commit()

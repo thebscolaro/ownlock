@@ -222,6 +222,44 @@ def ownlock_status(
     }
 
 
+@mcp.tool()
+def ownlock_request_access(
+    secret_name: str,
+    env: str = "default",
+    reason: Optional[str] = None,
+    cwd: Optional[str] = None,
+    global_vault: bool = False,
+    project: bool = False,
+) -> dict[str, Any]:
+    """Request human approval to read a policy-gated secret (confirm/session policies).
+
+    Spawns `ownlock get` in a subprocess. Interactive approval happens in the
+  terminal where ownlock runs; non-interactive callers receive an error.
+    """
+    resolved = _resolve_cwd(cwd)
+    args = ["get", secret_name, "--env", env]
+    if global_vault:
+        args.append("--global")
+    if project:
+        args.append("--project")
+    try:
+        proc = _run_ownlock(args, cwd=resolved, timeout=120.0)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"approved": False, "error": str(e)}
+    if proc.returncode != 0:
+        return {
+            "approved": False,
+            "error": _truncate((proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"),
+        }
+    return {
+        "approved": True,
+        "secret_name": secret_name,
+        "env": env,
+        "reason": reason,
+        "note": "Value was printed to the ownlock subprocess stdout (not returned via MCP).",
+    }
+
+
 def main() -> None:
     """Stdio MCP entrypoint for IDEs (e.g. Cursor)."""
     mcp.run()

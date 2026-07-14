@@ -43,9 +43,15 @@ from typing import Any, Optional
 
 
 def is_enabled() -> bool:
-    """True when ``OWNLOCK_AUDIT`` is set to a truthy value (``1``, ``true``, ``yes``)."""
+    """True when ``OWNLOCK_AUDIT`` is set, or when an AI agent is in the process tree."""
     val = os.environ.get("OWNLOCK_AUDIT", "").strip().lower()
-    return val in {"1", "true", "yes", "on"}
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    from ownlock.agent import detect_agent_actor
+
+    return detect_agent_actor() is not None
 
 
 def _audit_log_path(vault_path: Path) -> Path:
@@ -76,10 +82,14 @@ def record(
     if not is_enabled():
         return False
 
+    from ownlock.agent import resolve_actor
+
+    effective_actor = resolve_actor(None if actor == "ownlock" else actor)
+
     record_data: dict[str, Any] = {
         "ts": datetime.now(UTC).isoformat(),
         "op": op,
-        "actor": actor,
+        "actor": effective_actor,
         "vault": str(vault_path),
     }
     if name is not None:

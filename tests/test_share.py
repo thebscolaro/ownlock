@@ -265,3 +265,67 @@ class TestShareCLI:
         # Destination vault unchanged.
         with VaultManager(vault_b, PASSPHRASE) as vm:
             assert vm.list_secrets() == []
+
+
+class TestTeamBundle:
+    def test_write_team_bundle_and_find(self, tmp_path):
+        from ownlock.share import find_team_bundle, write_team_bundle
+
+        vault = tmp_path / ".ownlock" / "vault.db"
+        vault.parent.mkdir()
+        vault.touch()
+        path = write_team_bundle(vault, '{"ok": true}')
+        assert path.name == "team.olbundle"
+        assert path.read_text() == '{"ok": true}'
+        assert find_team_bundle(vault) == path
+
+    def test_share_team_requires_project_vault(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setenv("OWNLOCK_BUNDLE_PASSPHRASE", BUNDLE_PP)
+        # No project vault — should fail, not write under ~/.ownlock
+        result = runner.invoke(app, ["share", "--team", "--yes"])
+        assert result.exit_code == 1
+        assert "project vault" in result.output.lower()
+        assert not (tmp_path / ".ownlock" / "team.olbundle").exists()
+
+    def test_share_team_writes_bundle(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setenv("OWNLOCK_BUNDLE_PASSPHRASE", BUNDLE_PP)
+        project = tmp_path / ".ownlock" / "vault.db"
+        with VaultManager(project, PASSPHRASE) as vm:
+            vm.set("TEAM_KEY", "team-secret-value")
+        result = runner.invoke(app, ["share", "--team", "--yes"])
+        assert result.exit_code == 0, result.output
+        bundle = tmp_path / ".ownlock" / "team.olbundle"
+        assert bundle.exists()
+        assert "encrypted" in result.output.lower() or "Wrote" in result.output
+
+    def test_import_share_rejects_invalid_policy(self, tmp_path, monkeypatch):
+        from ownlock.share import export_bundle
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setenv("OWNLOCK_BUNDLE_PASSPHRASE", BUNDLE_PP)
+        vault_path = tmp_path / ".ownlock" / "vault.db"
+        VaultManager.init_vault(vault_path, PASSPHRASE).close()
+        bundle_path = tmp_path / "bad.olbundle"
+        secrets = [
+            {
+                "name": "X",
+                "env": "default",
+                "value": "v",
+                "policy": "totally-invalid",
+            }
+        ]
+        bundle_path.write_text(export_bundle(secrets, BUNDLE_PP), encoding="utf-8")
+        monkeypatch.setattr(
+            "ownlock.cli._resolve_vault_path",
+            lambda global_vault=False, project=False: vault_path,
+        )
+        result = runner.invoke(
+            app, ["import-share", str(bundle_path), "--yes", "--overwrite"]
+        )
+        assert result.exit_code == 1
+        assert "Invalid policy" in result.output or "policy" in result.output.lower()

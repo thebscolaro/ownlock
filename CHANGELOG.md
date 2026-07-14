@@ -5,6 +5,41 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-14
+
+### Added
+
+- **`ownlock shield`** — one command to harden repos against agent secret-reading: `.cursorignore` / `.claudeignore`, Claude `permissions.deny`, and `PreToolUse` hook; `ownlock shield --verify` self-test.
+- **`ownlock guard`** — DLP redaction for agent tool output; `ownlock guard --stdin` for hooks; `ownlock guard --install-hook` for Claude `PostToolUse`.
+- **`ownlock status`** — vault, shield, audit, and agent-detection summary (`--json` for scripts).
+- **Agent audit attribution** — process-tree detection auto-enables audit logging when an AI agent calls ownlock; `actor` field in audit JSONL.
+- **Per-secret policies** — `ownlock set NAME --policy open|session|confirm` with approval gates on `get` and `vault()` resolution.
+- **Team encrypted bundle** — `ownlock share --team` writes `.ownlock/team.olbundle`; `ownlock init` offers auto-import.
+- **Provider bridges** — `vault("op://...")` and `vault("aws-sm://...")` via local `op` / `aws` CLI.
+- **MCP `ownlock_request_access`** — human approval flow for policy-gated secrets.
+- **Distribution assets** — `scripts/install.sh`, Homebrew formula (`packaging/homebrew/`), winget manifest stub, `action/action.yml` for CI.
+- **Supply-chain hardening** — workflow default read-only permissions, pinned action SHAs, Dependabot, CODEOWNERS, `docs/github-security.md`.
+
+### Changed
+
+- README repositioned around agent-safety narrative and multi-channel install paths.
+
+## [0.2.2] - 2026-07-01
+
+### Added
+
+- **`ownlock --version` / `-V`** — prints package version from metadata.
+
+### Fixed
+
+- Rekey schema hint uses current schema version constant.
+- `ownlock run` exits 127 when command not found.
+- Scanner single-pass performance improvement.
+
+### Security
+
+- Bundle KDF iteration cap; backup files created mode 0600 from the start.
+
 ## [0.2.1] - 2026-06-03
 
 ### Fixed

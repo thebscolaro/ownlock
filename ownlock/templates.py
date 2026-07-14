@@ -166,12 +166,20 @@ def render_text(
     *,
     default_env: str = "default",
     default_format: str = "raw",
+    is_tty: Optional[bool] = None,
 ) -> tuple[str, int]:
     """Replace every ``{{vault(...)}}`` in *text*. Returns ``(rendered, count)``.
 
     Raises ``KeyError`` if a reference is invalid, the secret is missing, or
     the ``format="..."`` override names a format that isn't supported.
+    Raises ``PermissionError`` when a ``session``/``confirm`` policy cannot be
+    satisfied (e.g. non-TTY).
     """
+    if is_tty is None:
+        from ownlock.paths import is_tty as paths_is_tty
+
+        is_tty = paths_is_tty()
+
     count = 0
 
     def _replace(match: re.Match[str]) -> str:
@@ -194,7 +202,9 @@ def render_text(
         project: Optional[bool] = (project_flag == "true") if project_flag else None
         use_global: Optional[bool] = (global_flag == "true") if global_flag else None
 
-        value = lookup.lookup(key, env, project=project, use_global=use_global)
+        value = lookup.lookup(
+            key, env, project=project, use_global=use_global, is_tty=bool(is_tty)
+        )
         count += 1
         return _ESCAPERS[fmt](value)
 
@@ -422,7 +432,10 @@ def render_file(
     text = src.read_text(encoding="utf-8")
     default_format = "raw" if raw else detect_format(dst)
     rendered, count = render_text(
-        text, lookup, default_env=default_env, default_format=default_format
+        text,
+        lookup,
+        default_env=default_env,
+        default_format=default_format,
     )
     write_atomic(dst, rendered)
     return count

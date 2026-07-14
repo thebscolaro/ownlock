@@ -52,6 +52,10 @@ class TestSetGet:
         vault.set("API_KEY", "sk-123")
         assert vault.get("API_KEY") == "sk-123"
 
+    def test_set_with_policy(self, vault):
+        vault.set("API_KEY", "sk-123", policy="session")
+        assert vault.get_policy("API_KEY") == "session"
+
     def test_get_nonexistent_returns_none(self, vault):
         assert vault.get("MISSING") is None
 
@@ -105,6 +109,15 @@ class TestGetAllDecrypted:
         vault.set("KEY", "prod-val", env="prod")
         assert vault.get_all_decrypted("default") == {"KEY": "default-val"}
         assert vault.get_all_decrypted("prod") == {"KEY": "prod-val"}
+
+    def test_all_envs_when_env_none(self, vault):
+        vault.set("A", "a-default", env="default")
+        vault.set("B", "b-prod", env="prod")
+        vault.set("A", "a-prod", env="prod")
+        all_secrets = vault.get_all_decrypted(None)
+        assert all_secrets["A"] == "a-default"
+        assert all_secrets["B"] == "b-prod"
+        assert all_secrets["A@prod"] == "a-prod"
 
 
 class TestMultiEnv:

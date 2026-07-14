@@ -18,7 +18,7 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 - **Vault metadata**: A `meta` table records `schema_version`, `kdf_algo`, `kdf_iterations`, and `created_at`. `ownlock doctor` reports these without needing the passphrase.
 - **Passphrase resolution order**: `OWNLOCK_PASSPHRASE` env var → system keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service) → interactive prompt. The env var wins so CI / scripts can override the keyring.
 - **Passphrase isolation in `run`**: `OWNLOCK_PASSPHRASE` and `OWNLOCK_NEW_PASSPHRASE` are stripped from the parent environment before launching child processes via `ownlock run`. Resolved secret values still reach the child as regular environment variables, but the master passphrase that unlocks the vault never does.
-- **Backups**: `import --rewrite`, `rewrite-env`, and `rekey` write backups under `.ownlock/backups/` with mode `0600` on POSIX. `.ownlock/` is gitignored by default, so backups never leak through git. Older versions wrote `*.ownlock.bak` next to the original file; `ownlock scan` and `ownlock doctor` flag any such legacy files. `rekey`'s vault snapshot also captures the SQLite WAL/SHM sidecars so a hard-killed previous process whose writes are still in the WAL is restorable.
+- **Backups**: `import --rewrite`, `rewrite-env`, and `rekey` write backups under `.ownlock/backups/` with mode `0600` on POSIX. Vault contents are gitignored via `.ownlock/*` by default (with `!.ownlock/team.olbundle` so the encrypted team bundle can be committed). Older versions wrote `*.ownlock.bak` next to the original file; `ownlock scan` and `ownlock doctor` flag any such legacy files. `rekey`'s vault snapshot also captures the SQLite WAL/SHM sidecars so a hard-killed previous process whose writes are still in the WAL is restorable.
 - **Concurrent writes**: The vault is a single SQLite file; ownlock opens it in **WAL mode** with a 5-second busy-timeout, so two processes (e.g. an agent setting a secret while a developer runs `ownlock run` in another shell) can read and write the same vault file without corruption. `ownlock rekey` takes an `IMMEDIATE` write lock for the duration of the re-encryption transaction.
 - **Encrypted bundles**: `ownlock share` packages a subset of secrets into a JSON file encrypted with AES-256-GCM under a separate **bundle passphrase**, so a team can hand off secrets without distributing the local-vault passphrase. `ownlock import-share` decrypts the bundle and refuses to overwrite existing keys without explicit `--overwrite`.
 - **No network**: ownlock never makes network requests. All data stays local.
@@ -31,6 +31,8 @@ If you discover a security vulnerability in ownlock, please report it responsibl
 ## Security testing
 
 Automated checks (Bandit, pip-audit, targeted pytest) and OWASP-oriented mapping are described in [SECURITY_TESTING.md](SECURITY_TESTING.md).
+
+CI and GitHub Actions hardening (pinned actions, OIDC publish, fork PR policy) are documented in [docs/github-security.md](docs/github-security.md).
 
 ## Rendered templates
 
