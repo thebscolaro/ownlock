@@ -1,5 +1,9 @@
 name: CI
 
+# Default read-only; jobs that need more grant it explicitly.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -8,9 +12,6 @@ on:
     branches: [main]
 
 jobs:
-  # Fast PR feedback: every OS + Python combination, no subprocess smoke tests.
-  # Subprocess smoke is covered by the dedicated `smoke` job below so a typo
-  # in test_smoke.py won't block the unit-test signal.
   test:
     strategy:
       fail-fast: false
@@ -28,10 +29,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -49,23 +50,22 @@ jobs:
         run: |
           pytest tests/ -m "not smoke" --cov=ownlock --cov-report=term-missing --cov-report=html --cov-fail-under=84
 
+      # Coverage HTML is for debugging only — short retention, never on every PR forever.
       - name: Upload coverage HTML
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-html
           path: htmlcov/
+          retention-days: 7
 
-  # End-to-end subprocess smoke tests. Single OS/Python (ubuntu / 3.12) is
-  # enough — smoke covers wiring, not platform behavior. Splitting it out
-  # keeps fast feedback on PRs from being blocked by a flaky subprocess test.
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -81,32 +81,27 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Install and audit
-        # CVE-2026-3219 is a pip-in-pip advisory (polyglot tar+zip install):
-        # fix is merged upstream in pypa/pip#13870 but not yet in a released
-        # pip. Local-only, requires user interaction, no confidentiality
-        # impact. Remove this ignore once a pip release containing the fix
-        # is on PyPI.
         run: |
           python -m pip install --upgrade "pip>=26"
           pip install -e ".[dev,mcp]"
           bandit -r ownlock -c pyproject.toml -f txt
-          pip-audit --ignore-vuln CVE-2026-3219
+          pip-audit
 
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -116,25 +111,29 @@ jobs:
       - name: Build package
         run: python -m build
 
+      # Dist wheels only needed for tag → PyPI publish. Skip on PRs to avoid storage burn.
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
           path: dist/
+          retention-days: 7
 
-  # Only publish after build succeeds AND tests/security/smoke all pass (avoid uploading broken releases).
   publish:
     needs: [test, smoke, security, build]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    environment: pypi
     permissions:
       id-token: write
+      contents: read
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

@@ -1,0 +1,9 @@
+# Workflow, supply chain, and crypto — require maintainer review.
+/.github/                    @thebscolaro
+/ownlock/crypto.py           @thebscolaro
+/ownlock/vault.py            @thebscolaro
+/ownlock/share.py            @thebscolaro
+/ownlock/passphrase.py       @thebscolaro
+/pyproject.toml              @thebscolaro
+/SECURITY.md                 @thebscolaro
+/docs/github-security.md     @thebscolaro

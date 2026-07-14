@@ -1,0 +1,106 @@
+name: Release binaries
+
+# Build portable binaries and attach them directly to the GitHub Release.
+# Avoids Actions artifact storage: each matrix job uploads with `gh release upload`
+# (release assets on public repos do not consume the Actions storage quota).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach binaries to (e.g. v0.2.2)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  ensure-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" \
+              --title "${TAG}" \
+              --notes "Binary assets for ${TAG}."
+          fi
+
+  build:
+    needs: ensure-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: ownlock-linux-x64
+          - os: macos-latest
+            artifact: ownlock-macos-arm64
+          - os: windows-latest
+            artifact: ownlock-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.ensure-release.outputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package + PyInstaller
+        run: |
+          python -m pip install --upgrade "pip>=26"
+          pip install -e ".[mcp]"
+          pip install "pyinstaller>=6.3"
+
+      - name: Build binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          pyinstaller \
+            --noconfirm \
+            --clean \
+            --onefile \
+            --name ownlock \
+            --collect-all keyring \
+            --collect-all cryptography \
+            --hidden-import ownlock.cli \
+            --hidden-import ownlock.mcp_server \
+            ownlock/__main__.py
+          mkdir -p release-assets
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/ownlock.exe "release-assets/${{ matrix.artifact }}"
+          else
+            cp dist/ownlock "release-assets/${{ matrix.artifact }}"
+            chmod +x "release-assets/${{ matrix.artifact }}"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release-assets && sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256")
+          else
+            (cd release-assets && shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256")
+          fi
+
+      - name: Upload to GitHub Release (no Actions artifacts)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" release-assets/* \
+            --repo "${{ github.repository }}" \
+            --clobber
