@@ -8,7 +8,7 @@ Walks the user's environment without ever decrypting a secret:
   without printing the value.
 * Surfaces stale plaintext leftovers (legacy backups, ``.ownlock-tmp``) that
   ``ownlock scan`` would also flag.
-* Checks ``.gitignore`` covers ``.ownlock/``.
+* Checks ``.gitignore`` covers ``.ownlock/*``.
 
 Returned as a plain ``dict`` so the CLI can render it (Rich text) or emit it
 as JSON (``ownlock doctor --json`` / the ``ownlock_doctor`` MCP tool) without
@@ -138,7 +138,11 @@ def _gitignore_status(cwd: Path) -> bool | None:
     if not gitignore.exists():
         return False
     try:
-        return ".ownlock" in gitignore.read_text(encoding="utf-8", errors="ignore")
+        text = gitignore.read_text(encoding="utf-8", errors="ignore")
+        return any(
+            ln.strip() in {".ownlock/", ".ownlock", ".ownlock/*"}
+            for ln in text.splitlines()
+        )
     except OSError:
         return None
 
@@ -232,9 +236,9 @@ def render_doctor_report(state: dict[str, Any], console: Console) -> None:
 
     if state["gitignore_covers_ownlock"] is False:
         console.print(
-            "[yellow].gitignore does not cover .ownlock/ — run "
+            "[yellow].gitignore does not cover .ownlock/* — run "
             "[bold]ownlock init[/bold] in this directory or add the entry "
-            "manually.[/yellow]"
+            "manually (use .ownlock/* so !.ownlock/team.olbundle can be committed).[/yellow]"
         )
 
     stale_global = state["global_vault"].get("kdf_stale")

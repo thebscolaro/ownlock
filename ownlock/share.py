@@ -30,6 +30,7 @@ import base64
 import json
 import os
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -121,3 +122,35 @@ def import_bundle(text: str, passphrase: str) -> list[dict[str, str]]:
         ):
             raise ValueError("Bundle contains a malformed secret entry.")
     return secrets
+
+
+TEAM_BUNDLE_FILENAME = "team.olbundle"
+
+
+def team_bundle_path(vault_path: Path) -> Path:
+    """Default path for a git-committable team bundle next to the vault."""
+    return vault_path.parent / TEAM_BUNDLE_FILENAME
+
+
+def find_team_bundle(vault_path: Path) -> Path | None:
+    """Return the team bundle path if it exists beside *vault_path*."""
+    path = team_bundle_path(vault_path)
+    return path if path.exists() else None
+
+
+def write_team_bundle(vault_path: Path, text: str) -> Path:
+    """Write encrypted team bundle text beside the vault (mode 0600 on POSIX)."""
+    import warnings
+
+    path = team_bundle_path(vault_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o600)
+        except OSError as e:
+            warnings.warn(
+                f"Could not set mode 0600 on {path}: {e}",
+                stacklevel=2,
+            )
+    return path

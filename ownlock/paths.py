@@ -39,7 +39,12 @@ from ownlock.vault import (
 # here).
 SECRET_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-OWNLOCK_GITIGNORE_ENTRY = "\n# ownlock vault (never commit)\n.ownlock/\n"
+OWNLOCK_GITIGNORE_ENTRY = (
+    "\n# ownlock vault (never commit vault.db / backups)\n"
+    "# Use .ownlock/* so !.ownlock/team.olbundle can be committed.\n"
+    ".ownlock/*\n"
+    "!.ownlock/team.olbundle\n"
+)
 
 _console = Console()
 
@@ -180,26 +185,59 @@ def vault_path_for_ref(
 
 
 def ensure_gitignore() -> None:
-    """Add ``.ownlock/`` to ``.gitignore`` if not already present.
+    """Ignore vault contents under ``.ownlock/`` but allow the team bundle.
 
-    Creates ``.gitignore`` if missing. No-op when the literal substring
-    ``.ownlock`` already appears (covers ``.ownlock/``, ``.ownlock``, and
-    negation patterns like ``!.ownlock/keep`` — false positives here are
-    safer than the alternative of double-adding the entry).
+    Writes::
+
+        .ownlock/*
+        !.ownlock/team.olbundle
+
+    Using ``.ownlock/*`` (not ``.ownlock/``) is required so git can still
+    track ``team.olbundle`` via the negation rule.
     """
     gitignore_path = Path.cwd() / ".gitignore"
+    team_allow = "!.ownlock/team.olbundle"
+    ignore_contents = ".ownlock/*"
+
     if not gitignore_path.exists():
         gitignore_path.write_text(
-            "# ownlock vault (never commit)\n.ownlock/\n",
+            "# ownlock vault (never commit vault.db / backups)\n"
+            f"{ignore_contents}\n"
+            f"{team_allow}\n",
             encoding="utf-8",
         )
-        _console.print("[dim]Created .gitignore with .ownlock/[/dim]")
+        _console.print(
+            "[dim]Created .gitignore with .ownlock/* (keeps !.ownlock/team.olbundle).[/dim]"
+        )
         return
 
     content = gitignore_path.read_text(encoding="utf-8")
-    if ".ownlock" in content:
+    lines = content.splitlines()
+    has_dir_ignore = any(ln.strip() in {".ownlock/", ".ownlock"} for ln in lines)
+    has_star_ignore = any(ln.strip() == ignore_contents for ln in lines)
+    has_team_allow = any(ln.strip() == team_allow for ln in lines)
+
+    additions: list[str] = []
+    if has_dir_ignore and not has_star_ignore:
+        # Migrate broken ".ownlock/" pattern so negation can work.
+        additions.append(ignore_contents)
+    elif not has_dir_ignore and not has_star_ignore:
+        additions.append(ignore_contents)
+    if not has_team_allow:
+        additions.append(team_allow)
+
+    if not additions:
         return
 
     with gitignore_path.open("a", encoding="utf-8") as f:
-        f.write(OWNLOCK_GITIGNORE_ENTRY)
-    _console.print("[dim]Added .ownlock/ to .gitignore[/dim]")
+        f.write("\n# ownlock vault (never commit vault.db / backups)\n")
+        for item in additions:
+            f.write(f"{item}\n")
+    if ignore_contents in additions and team_allow in additions:
+        _console.print(
+            "[dim]Added .ownlock/* to .gitignore (keeps !.ownlock/team.olbundle).[/dim]"
+        )
+    elif ignore_contents in additions:
+        _console.print("[dim]Updated .gitignore to .ownlock/* for team bundle commits.[/dim]")
+    else:
+        _console.print("[dim]Allowed !.ownlock/team.olbundle in .gitignore[/dim]")
