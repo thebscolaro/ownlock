@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ownlock — local secret broker for humans and AI agents</title>
+  <meta name="description" content="Local secret broker for humans and AI agents: inject vault secrets into sandboxes, keep plaintext .env off agent tools. No Docker, no cloud account." />
+  <link rel="canonical" href="https://ownlock.ai/" />
+  <meta property="og:title" content="ownlock" />
+  <meta property="og:description" content="Secrets for the process — not for the prompt." />
+  <meta property="og:url" content="https://ownlock.ai/" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <a class="mark" href="#top">ownlock</a>
+    <nav class="nav">
+      <a href="#how">How</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/thebscolaro/ownlock">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-label="Introduction">
+      <div class="hero-plane" aria-hidden="true">
+        <svg class="hero-vault" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid slice">
+          <defs>
+            <linearGradient id="plane" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#12161c"/>
+              <stop offset="55%" stop-color="#0c0e10"/>
+              <stop offset="100%" stop-color="#0a1f16"/>
+            </linearGradient>
+            <radialGradient id="glow" cx="72%" cy="38%" r="42%">
+              <stop offset="0%" stop-color="#3dff9a" stop-opacity="0.28"/>
+              <stop offset="100%" stop-color="#3dff9a" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <rect width="1200" height="720" fill="url(#plane)"/>
+          <rect width="1200" height="720" fill="url(#glow)"/>
+          <g fill="none" stroke="#3dff9a" stroke-opacity="0.12" stroke-width="1">
+            <path d="M0 520 L340 180 H620 L900 420"/>
+            <path d="M120 720 L480 260 H760 L1100 600"/>
+            <path d="M-40 300 H420 L640 80 H980"/>
+          </g>
+          <g transform="translate(760 210)">
+            <!-- Shorter, stockier padlock -->
+            <path d="M70 78 V52 a55 55 0 0 1 110 0 V78" fill="none" stroke="#3dff9a" stroke-opacity="0.7" stroke-width="14" stroke-linecap="round"/>
+            <rect x="40" y="78" width="170" height="150" rx="22" fill="#0c0e10" stroke="#3dff9a" stroke-opacity="0.55" stroke-width="2"/>
+            <circle cx="125" cy="145" r="16" fill="#3dff9a"/>
+            <rect x="121" y="145" width="8" height="28" rx="4" fill="#0c0e10"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="hero-copy reveal">
+        <p class="brand">ownlock</p>
+        <h1>Secrets for the process — not for the prompt.</h1>
+        <p class="lede"><span class="mono">ownlock run</span> injects vault values into sandbox children. Shield and guard keep plaintext <span class="mono">.env</span> off agent tools and redact leaks. No Docker. No cloud account.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#install">Install</a>
+          <a class="btn btn-ghost" href="https://github.com/thebscolaro/ownlock">GitHub</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section problem reveal" id="problem">
+      <h2>Two problems, one broker</h2>
+      <p>
+        Sandboxes don’t inherit your shell exports — so agents can’t run real commands unless secrets somehow reach the child process.
+        But if those secrets sit in a plaintext <span class="mono">.env</span>, tools can read the file straight into chat context.
+        ownlock encrypts values at rest, injects them only into the process you run, and hardens the repo against scrapes.
+      </p>
+    </section>
+
+    <section class="section how" id="how">
+      <h2 class="reveal">How it helps</h2>
+
+      <article class="beat reveal">
+        <div class="beat-copy">
+          <p class="beat-step">01 — shield</p>
+          <h3>Harden the repo in one command</h3>
+          <p>Writes ignore files, Claude deny rules, and a PreToolUse hook that blocks <span class="mono">.env</span> / <span class="mono">.ownlock</span> reads.</p>
+        </div>
+        <pre class="terminal" tabindex="0"><code><span class="prompt">$</span> ownlock shield --verify
+<span class="ok">Shield verified — agent secret reads blocked.</span><span class="cursor cursor-1" aria-hidden="true"></span></code></pre>
+      </article>
+
+      <article class="beat beat-alt reveal">
+        <div class="beat-copy">
+          <p class="beat-step">02 — run</p>
+          <h3>Inject secrets where sandboxes actually see them</h3>
+          <p><span class="mono">ownlock run</span> resolves the vault from disk and injects env into that one child — the layer your app reads from.</p>
+        </div>
+        <pre class="terminal" tabindex="0"><code><span class="prompt">$</span> ownlock run -- python app.py
+<span class="dim"># secrets in child env; passphrase never inherited</span><span class="cursor cursor-2" aria-hidden="true"></span></code></pre>
+      </article>
+
+      <article class="beat reveal">
+        <div class="beat-copy">
+          <p class="beat-step">03 — guard</p>
+          <h3>Redact leaks on the way out</h3>
+          <p>Stdout redaction and an optional PostToolUse hook turn accidental log dumps into <span class="mono">[REDACTED:NAME]</span>.</p>
+        </div>
+        <pre class="terminal" tabindex="0"><code><span class="prompt">$</span> ownlock guard --install-hook
+<span class="ok">Installed PostToolUse guard hook.</span><span class="cursor cursor-3" aria-hidden="true"></span></code></pre>
+      </article>
+    </section>
+
+    <section class="section install" id="install">
+      <h2 class="reveal">Install</h2>
+      <p class="reveal install-lede">Pick one. Works on macOS, Linux, and Windows.</p>
+
+      <div class="install-list reveal">
+        <div class="install-row">
+          <span class="install-label">uv</span>
+          <code class="cmd" data-copy>uv tool install ownlock</code>
+          <button type="button" class="copy" data-copy-btn aria-label="Copy uv install command">Copy</button>
+        </div>
+        <div class="install-row">
+          <span class="install-label">pipx</span>
+          <code class="cmd" data-copy>pipx install ownlock</code>
+          <button type="button" class="copy" data-copy-btn aria-label="Copy pipx install command">Copy</button>
+        </div>
+        <div class="install-row">
+          <span class="install-label">curl</span>
+          <code class="cmd" data-copy>curl -fsSL https://raw.githubusercontent.com/thebscolaro/ownlock/main/scripts/install.sh | bash</code>
+          <button type="button" class="copy" data-copy-btn aria-label="Copy curl install command">Copy</button>
+        </div>
+      </div>
+
+      <pre class="terminal reveal quickstart" tabindex="0"><code><span class="prompt">$</span> ownlock init
+<span class="prompt">$</span> ownlock shield
+<span class="prompt">$</span> ownlock run -- your-command<span class="cursor cursor-4" aria-hidden="true"></span></code></pre>
+    </section>
+
+    <section class="section trust reveal" id="trust">
+      <h2>Built to stay local</h2>
+      <ul class="trust-list">
+        <li>AES-256-GCM vault on disk — no network calls from ownlock itself</li>
+        <li>Optional MCP server delegates to the CLI; it never decrypts in-process</li>
+        <li>Open source on GitHub — MIT license</li>
+        <li>Cross-platform: macOS, Linux, Windows</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p class="footer-brand">ownlock</p>
+    <p class="footer-links">
+      <a href="https://github.com/thebscolaro/ownlock">GitHub</a>
+      <a href="https://pypi.org/project/ownlock/">PyPI</a>
+      <a href="mailto:security@ownlock.ai">security@ownlock.ai</a>
+    </p>
+    <p class="footer-note">Local secret broker for humans and AI agents.</p>
+  </footer>
+
+  <script src="script.js" defer></script>
+</body>
+</html>

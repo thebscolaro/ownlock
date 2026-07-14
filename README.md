@@ -1,13 +1,38 @@
 # ownlock
 
-Lightweight secrets manager — encrypted local vault, `.env` injection, stdout redaction.
+**The cross-platform local secret broker for humans and AI agents.**
 
-No Docker. No cloud account. Just `pip install ownlock`.
+Encrypted local vault, runtime env injection, stdout redaction, and one-command agent hardening — no Docker, no cloud account.
+
+```bash
+# Install (pick one)
+uv tool install ownlock    # recommended
+pipx install ownlock
+pip install ownlock
+curl -fsSL https://raw.githubusercontent.com/thebscolaro/ownlock/main/scripts/install.sh | bash
+
+# Homebrew (clone once, or use the upcoming tap — see packaging/README.md)
+brew install --formula packaging/homebrew/ownlock.rb
+```
+
+**Stop your AI agent from reading `.env` files:**
+
+```bash
+ownlock init
+ownlock shield          # blocks .env / .ownlock reads in Cursor + Claude Code
+ownlock guard --install-hook   # redacts secrets from agent tool output
+ownlock status          # vault + shield + audit posture at a glance
+```
+
+No Docker. No cloud account. Works on macOS, Linux, and Windows.
 
 **Why teams use it**
 
-- **Works in Cursor / Codex / Claude Code sandboxes** where `export DATABASE_URL=...` in your shell does not cross into the agent's isolated session — `ownlock run` reads the vault from disk and injects secrets into the child process.
-- **Commit `.env` with `vault("KEY")` references** — teammates clone the repo and run `ownlock init` to fill in their local vault; no Slack DMs with secret lists.
+- **Agent sandboxes** — `ownlock run` injects secrets from disk into the child process; parent-shell `export` does not cross into Cursor/Codex/Claude Code sandboxes.
+- **Agent safety** — `ownlock shield` writes ignore files + Claude `PreToolUse` hooks; `ownlock guard` pipes tool output through DLP redaction.
+- **Per-secret policies** — `ownlock set KEY --policy confirm|session|open` gates access for high-risk secrets.
+- **Team sync** — `ownlock share --team` writes a git-committable `.ownlock/team.olbundle`; teammates hydrate on `ownlock init`.
+- **Commit `.env` with `vault("KEY")` references** — teammates clone and fill their local vault; no Slack DMs with secret lists.
 
 ---
 
@@ -65,6 +90,9 @@ Tools:
 
 - **`ownlock_run`** — same as `ownlock run -f <file> -e <vault_env> -- <command...>`; returns exit code and captured stdout/stderr (redaction applies in the child as usual).
 - **`ownlock_list_secret_names`** — same as `ownlock list` (names only, never values).
+- **`ownlock_status`** — vault summary via subprocess (`doctor` + `list --json`).
+- **`ownlock_doctor`** — health check JSON (schema, KDF, passphrase source).
+- **`ownlock_request_access`** — approval flow for policy-gated secrets (`confirm` / `session`).
 - **`ownlock_version`** — installed package version.
 
 `get` and `export` are intentionally not exposed via MCP.
@@ -372,7 +400,7 @@ ownlock is a **local-developer** tool. It does not replace your platform's secre
 
 The shared boundary is **the env vars your application reads** (`DATABASE_URL`, `STRIPE_KEY`, …). ownlock injects them locally; CI / your runtime injects them in production. The app code stays the same.
 
-`.ownlock/` is gitignored by default, so the local vault never reaches CI on its own — you opt in if you want it. A typical team setup:
+`.ownlock/*` is gitignored by default (with `!.ownlock/team.olbundle` allowed), so the local vault never reaches CI on its own — you opt in if you want it. A typical team setup:
 
 - Each developer runs `ownlock init` after cloning (or `ownlock import` to fill in `vault(...)` placeholders).
 - CI sets the same env var names directly from the platform's secrets store. ownlock isn't installed on the runner.
@@ -450,7 +478,7 @@ ownlock install-hook          # local: ownlock scan on every commit
 - **Encryption + KDF details, threat model, and the full security posture** live in [SECURITY.md](SECURITY.md).
 - **get / export**: Both print secrets to stdout. Use in trusted environments only; prefer `ownlock run` to inject without printing.
 - **Overwrite**: `set` and `import` overwrite existing values for the same key (and env); no append.
-- **File permissions**: Restrict permissions on `~/.ownlock/` and `.ownlock/`. Project init adds `.ownlock/` to `.gitignore` and writes backups under that directory with mode `0600`.
+- **File permissions**: Restrict permissions on `~/.ownlock/` and `.ownlock/`. Project init adds `.ownlock/*` (and `!.ownlock/team.olbundle`) to `.gitignore` and writes backups under that directory with mode `0600`.
 - **Reporting**: See [SECURITY.md](SECURITY.md#reporting-vulnerabilities).
 - **Automated checks**: Bandit, pip-audit, security-focused tests, and subprocess smoke tests (`pytest -m smoke`) — see [SECURITY_TESTING.md](SECURITY_TESTING.md). Editable installs may skip CVE lookup for the ownlock package itself; dependencies are still audited.
 
