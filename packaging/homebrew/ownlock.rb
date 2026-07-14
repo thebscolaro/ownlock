@@ -7,7 +7,7 @@
 #   brew tap thebscolaro/ownlock
 #   brew install ownlock
 #
-# Points at the latest *published* PyPI release (0.2.2). Bump url/sha/version
+# Points at the latest *published* PyPI release (0.3.1). Bump url/sha/version
 # when cutting the next release.
 
 class Ownlock < Formula
@@ -15,10 +15,10 @@ class Ownlock < Formula
 
   desc "Cross-platform local secret broker for developers and AI agents"
   homepage "https://github.com/thebscolaro/ownlock"
-  url "https://files.pythonhosted.org/packages/2f/4d/e33605f2c084fa4cf2feffe09a4ef8537862dd6cbd59137c236957070a9e/ownlock-0.2.2.tar.gz"
-  sha256 "51218f1c1c470cc047d7ca941f6f2f28c36fdb1cd73658ceeef408b0ae4b0188"
+  url "https://files.pythonhosted.org/packages/8a/84/8fbff5c2722e60869a6fe464adc36b2575804005a8d476dc7c8c7fd58435/ownlock-0.3.1.tar.gz"
+  sha256 "a6a515d170a6e72cfd459580bb1a16619ed68b317e8698c77455fa703a57b301"
   license "MIT"
-  version "0.2.2"
+  version "0.3.1"
 
   depends_on "python@3.12"
 
