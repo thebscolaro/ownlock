@@ -8,6 +8,7 @@ from typing import Optional
 
 from ownlock import vault as _vault_module
 from ownlock.passphrase import Passphrase, PassphraseInput
+from ownlock.paths import is_tty as paths_is_tty
 from ownlock.vault import VaultManager
 
 # vault() reference: "vault(" + quoted name + optional kwargs blob + ")"
@@ -20,6 +21,11 @@ KWARG_RE = re.compile(
     r'(\w+)\s*=\s*(?:"([^"]*)"|(true|false))'
 )
 _SECRET_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+_EXTERNAL_PREFIXES = ("op://", "aws-sm://", "az-kv://", "azure-kv://")
+
+
+def _is_external_ref(name: str) -> bool:
+    return name.startswith(_EXTERNAL_PREFIXES)
 
 
 def parse_vault_kwargs(args_str: Optional[str]) -> dict[str, str]:
@@ -72,7 +78,24 @@ class VaultLookup:
         *,
         project: Optional[bool] = None,
         use_global: Optional[bool] = None,
+        is_tty: bool = False,
     ) -> str:
+        from ownlock.policy import check_policy_access, normalize_policy
+
+        if _is_external_ref(name):
+            import os
+
+            from ownlock.providers import resolve_external_secret
+
+            # External refs are not vault rows; gate via OWNLOCK_EXTERNAL_POLICY
+            # (default open). Set confirm/session to require interactive unlock.
+            pol = normalize_policy(os.environ.get("OWNLOCK_EXTERNAL_POLICY"))
+            if not check_policy_access(name, env, pol, is_tty=is_tty):
+                raise PermissionError(
+                    f"Access denied for external secret '{name}' (env={env})"
+                )
+            return resolve_external_secret(name)
+
         if not _SECRET_NAME_RE.match(name):
             raise KeyError(f"Invalid secret name '{name}' in vault() reference")
 
@@ -94,14 +117,19 @@ class VaultLookup:
                     )
                 self._project_vm = VaultManager(self._project_path, self._passphrase)
                 self._project_vm.open()
-            value = self._project_vm.get(name, env)
+            vm = self._project_vm
         else:
             if self._global_vm is None:
                 self._global_vm = VaultManager(
                     _vault_module.GLOBAL_VAULT_PATH, self._passphrase
                 )
                 self._global_vm.open()
-            value = self._global_vm.get(name, env)
+            vm = self._global_vm
+
+        policy = vm.get_policy(name, env)
+        if not check_policy_access(name, env, policy, is_tty=is_tty):
+            raise PermissionError(f"Access denied for secret '{name}' (env={env})")
+        value = vm.get(name, env)
 
         if value is None:
             raise KeyError(f"Secret '{name}' (env={env}) not found in vault")
@@ -205,6 +233,7 @@ def resolve_env_file(
                     vault_env,
                     project=project_bool,
                     use_global=global_bool,
+                    is_tty=paths_is_tty(),
                 )
                 resolved[key] = value
                 secret_names.append(key)
