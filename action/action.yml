@@ -1,0 +1,61 @@
+name: ownlock/setup-action
+description: Install ownlock and hydrate a project vault from an encrypted team bundle in CI
+branding:
+  icon: lock
+  color: blue
+inputs:
+  version:
+    description: ownlock version to install from PyPI (default latest)
+    required: false
+    default: ""
+  bundle-path:
+    description: Path to team.olbundle (default .ownlock/team.olbundle)
+    required: false
+    default: .ownlock/team.olbundle
+  bundle-passphrase:
+    description: Bundle decryption passphrase (use secrets.OWNLOCK_BUNDLE_PASSPHRASE)
+    required: true
+  vault-passphrase:
+    description: Vault passphrase (use secrets.OWNLOCK_PASSPHRASE)
+    required: true
+  init:
+    description: Run ownlock init --project before import (true/false)
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install ownlock
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade "pip>=26"
+        if [ -n "${{ inputs.version }}" ]; then
+          pip install "ownlock==${{ inputs.version }}"
+        else
+          pip install ownlock
+        fi
+        ownlock --version
+    - name: Init project vault
+      if: inputs.init == 'true'
+      shell: bash
+      env:
+        OWNLOCK_PASSPHRASE: ${{ inputs.vault-passphrase }}
+      run: |
+        set -euo pipefail
+        if [ ! -f .ownlock/vault.db ]; then
+          # Non-interactive: passphrase from env, skip TTY import prompts.
+          ownlock init --project
+        fi
+    - name: Import team bundle
+      shell: bash
+      env:
+        OWNLOCK_PASSPHRASE: ${{ inputs.vault-passphrase }}
+        OWNLOCK_BUNDLE_PASSPHRASE: ${{ inputs.bundle-passphrase }}
+      run: |
+        set -euo pipefail
+        if [ ! -f "${{ inputs.bundle-path }}" ]; then
+          echo "Bundle not found: ${{ inputs.bundle-path }}" >&2
+          exit 1
+        fi
+        ownlock import-share "${{ inputs.bundle-path }}" --yes --overwrite

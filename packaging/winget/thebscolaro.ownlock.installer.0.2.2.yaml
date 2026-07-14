@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# After Release binaries workflow attaches ownlock-windows-x64.exe to v0.2.2,
+# run: scripts/fill_winget_sha.sh v0.2.2
+# then open a PR to microsoft/winget-pkgs.
+PackageIdentifier: thebscolaro.ownlock
+PackageVersion: 0.2.2
+InstallerLocale: en-US
+InstallerType: portable
+Commands:
+  - ownlock
+ReleaseDate: 2026-07-02
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/thebscolaro/ownlock/releases/download/v0.2.2/ownlock-windows-x64.exe
+    InstallerSha256: REPLACE_AFTER_BINARY_RELEASE
+    UpgradeBehavior: install
+ManifestType: installer
+ManifestVersion: 1.6.0
