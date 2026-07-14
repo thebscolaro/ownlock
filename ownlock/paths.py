@@ -193,11 +193,13 @@ def ensure_gitignore() -> None:
         !.ownlock/team.olbundle
 
     Using ``.ownlock/*`` (not ``.ownlock/``) is required so git can still
-    track ``team.olbundle`` via the negation rule.
+    track ``team.olbundle`` via the negation rule. Legacy ``.ownlock/`` /
+    ``.ownlock`` directory rules are removed on migrate so the negation works.
     """
     gitignore_path = Path.cwd() / ".gitignore"
     team_allow = "!.ownlock/team.olbundle"
     ignore_contents = ".ownlock/*"
+    legacy_dir_rules = {".ownlock/", ".ownlock"}
 
     if not gitignore_path.exists():
         gitignore_path.write_text(
@@ -213,27 +215,48 @@ def ensure_gitignore() -> None:
 
     content = gitignore_path.read_text(encoding="utf-8")
     lines = content.splitlines()
-    has_dir_ignore = any(ln.strip() in {".ownlock/", ".ownlock"} for ln in lines)
-    has_star_ignore = any(ln.strip() == ignore_contents for ln in lines)
-    has_team_allow = any(ln.strip() == team_allow for ln in lines)
+    removed_legacy = False
+    kept: list[str] = []
+    for ln in lines:
+        if ln.strip() in legacy_dir_rules:
+            removed_legacy = True
+            continue
+        kept.append(ln)
+
+    has_star_ignore = any(ln.strip() == ignore_contents for ln in kept)
+    has_team_allow = any(ln.strip() == team_allow for ln in kept)
 
     additions: list[str] = []
-    if has_dir_ignore and not has_star_ignore:
-        # Migrate broken ".ownlock/" pattern so negation can work.
-        additions.append(ignore_contents)
-    elif not has_dir_ignore and not has_star_ignore:
+    if not has_star_ignore:
         additions.append(ignore_contents)
     if not has_team_allow:
         additions.append(team_allow)
 
-    if not additions:
+    if not removed_legacy and not additions:
         return
 
-    with gitignore_path.open("a", encoding="utf-8") as f:
-        f.write("\n# ownlock vault (never commit vault.db / backups)\n")
-        for item in additions:
-            f.write(f"{item}\n")
-    if ignore_contents in additions and team_allow in additions:
+    if additions:
+        if kept and kept[-1].strip() != "":
+            kept.append("")
+        kept.append("# ownlock vault (never commit vault.db / backups)")
+        kept.extend(additions)
+
+    text = "\n".join(kept)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    gitignore_path.write_text(text, encoding="utf-8")
+
+    if removed_legacy and ignore_contents in additions:
+        _console.print(
+            "[dim]Migrated .gitignore: replaced .ownlock/ with .ownlock/* "
+            "(keeps !.ownlock/team.olbundle).[/dim]"
+        )
+    elif removed_legacy:
+        _console.print(
+            "[dim]Migrated .gitignore: removed .ownlock/ directory rule "
+            "(team bundle can be committed).[/dim]"
+        )
+    elif ignore_contents in additions and team_allow in additions:
         _console.print(
             "[dim]Added .ownlock/* to .gitignore (keeps !.ownlock/team.olbundle).[/dim]"
         )

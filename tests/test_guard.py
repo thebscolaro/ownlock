@@ -50,3 +50,15 @@ def test_install_guard_hook_recovers_bad_settings_json(tmp_path: Path):
     assert install_guard_hook(tmp_path) is True
     data = json.loads((claude / "settings.json").read_text())
     assert "PostToolUse" in data["hooks"]
+
+
+def test_install_guard_hook_windows_uses_ps1(tmp_path: Path, monkeypatch):
+    import ownlock.guard as guard
+
+    monkeypatch.setattr(guard.os, "name", "nt")
+    assert guard.install_guard_hook(tmp_path) is True
+    assert (tmp_path / ".claude" / "hooks" / "ownlock-guard.ps1").exists()
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert cmd.startswith("powershell -NoProfile -File")
+    assert "ownlock-guard.ps1" in cmd

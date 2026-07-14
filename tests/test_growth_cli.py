@@ -88,3 +88,16 @@ class TestEnsureGitignorePaths:
         ensure_gitignore()
         assert gi.read_text().count("!.ownlock/team.olbundle") == 1
         assert gi.read_text().count(".ownlock/*") == 1
+
+    def test_ensure_gitignore_strips_legacy_dir_rule(self, tmp_path, monkeypatch):
+        from ownlock.paths import ensure_gitignore
+
+        monkeypatch.chdir(tmp_path)
+        gi = tmp_path / ".gitignore"
+        gi.write_text("foo\n.ownlock/\n.ownlock\n")
+        ensure_gitignore()
+        text = gi.read_text()
+        assert ".ownlock/" not in {ln.strip() for ln in text.splitlines()}
+        assert ".ownlock" not in {ln.strip() for ln in text.splitlines()}
+        assert ".ownlock/*" in text
+        assert "!.ownlock/team.olbundle" in text

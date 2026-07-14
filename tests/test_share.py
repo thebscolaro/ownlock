@@ -302,6 +302,32 @@ class TestTeamBundle:
         assert bundle.exists()
         assert "encrypted" in result.output.lower() or "Wrote" in result.output
 
+    def test_share_team_full_export_warns(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setenv("OWNLOCK_BUNDLE_PASSPHRASE", BUNDLE_PP)
+        project = tmp_path / ".ownlock" / "vault.db"
+        with VaultManager(project, PASSPHRASE) as vm:
+            vm.set("A", "a-value")
+            vm.set("B", "b-value")
+        result = runner.invoke(app, ["share", "--team", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Warning" in result.output
+        assert "all 2 project secret" in result.output
+        assert "global vault" in result.output.lower()
+
+    def test_share_team_named_export_skips_full_warning(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setenv("OWNLOCK_BUNDLE_PASSPHRASE", BUNDLE_PP)
+        project = tmp_path / ".ownlock" / "vault.db"
+        with VaultManager(project, PASSPHRASE) as vm:
+            vm.set("A", "a-value")
+            vm.set("B", "b-value")
+        result = runner.invoke(app, ["share", "A", "--team", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Warning: exporting all" not in result.output
+
     def test_import_share_rejects_invalid_policy(self, tmp_path, monkeypatch):
         from ownlock.share import export_bundle
 

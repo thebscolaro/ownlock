@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,22 @@ CLAUDE_DENY_PERMISSIONS: tuple[str, ...] = (
     "Read(./.env.*)",
     "Read(./.ownlock/**)",
     "Read(./**/.ownlock/**)",
+)
+
+_SECRET_KEY_RE = re.compile(
+    r"(api[_-]?key|token|password|passwd|secret|credential|private[_-]?key|"
+    r"access[_-]?key|auth[_-]?token|client[_-]?secret|bearer)",
+    re.IGNORECASE,
+)
+_OBVIOUS_NON_SECRET_RE = re.compile(
+    r"^(true|false|yes|no|on|off|null|none|development|production|test|"
+    r"staging|local|debug|info|warn|error|0|1)$",
+    re.IGNORECASE,
+)
+_SECRET_VALUE_RE = re.compile(
+    r"^(sk-|ghp_|gho_|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16})"
+    r"|^[A-Za-z0-9+/_-]{24,}={0,2}$"
+    r"|^[0-9a-fA-F]{32,}$"
 )
 
 _HOOK_SCRIPT = """#!/usr/bin/env bash
@@ -67,6 +84,72 @@ esac
 exit 0
 """
 
+_HOOK_SCRIPT_PS1 = r"""# Installed by `ownlock shield` — blocks agent tools from reading .env / .ownlock.
+$ErrorActionPreference = 'Stop'
+$inputJson = [Console]::In.ReadToEnd()
+if ([string]::IsNullOrWhiteSpace($inputJson)) { exit 0 }
+try { $obj = $inputJson | ConvertFrom-Json } catch { exit 0 }
+
+function Deny-Reason([string]$Reason) {
+  $payload = @{
+    hookSpecificOutput = @{
+      hookEventName = 'PreToolUse'
+      permissionDecision = 'deny'
+      permissionDecisionReason = $Reason
+    }
+  } | ConvertTo-Json -Depth 6 -Compress
+  Write-Output $payload
+  exit 0
+}
+
+function Get-PathHaystack($ToolInput) {
+  if ($null -eq $ToolInput) { return '' }
+  $parts = @()
+  foreach ($name in @('file_path', 'path', 'pattern', 'glob', 'target_directory')) {
+    $val = $ToolInput.$name
+    if ($null -ne $val -and "$val".Length -gt 0) { $parts += "$val" }
+  }
+  return ($parts -join "`n")
+}
+
+$tool = [string]$obj.tool_name
+$hay = Get-PathHaystack $obj.tool_input
+switch -Regex ($tool) {
+  '^(Read|Edit|Write|Grep|Search|Glob)$' {
+    if ($hay -match '(^|[/\\])\.env([.]|$|/|\\)|(^|[/\\])\.env$') {
+      Deny-Reason 'ownlock shield: .env files are blocked'
+    }
+    if ($hay -match '(^|[/\\])\.ownlock([/\\]|$)') {
+      Deny-Reason 'ownlock shield: .ownlock/ is blocked'
+    }
+  }
+  '^Bash$' {
+    $cmd = ''
+    if ($null -ne $obj.tool_input -and $null -ne $obj.tool_input.command) {
+      $cmd = [string]$obj.tool_input.command
+    }
+    if ($cmd -match '\.env\b|\.ownlock') {
+      Deny-Reason 'ownlock shield: shell access to .env/.ownlock is blocked'
+    }
+  }
+}
+exit 0
+"""
+
+
+def _hook_basename() -> str:
+    return "ownlock-shield.ps1" if os.name == "nt" else "ownlock-shield.sh"
+
+
+def _hook_script_body() -> str:
+    return _HOOK_SCRIPT_PS1 if os.name == "nt" else _HOOK_SCRIPT
+
+
+def _hook_command(rel_hook: str) -> str:
+    if os.name == "nt":
+        return f"powershell -NoProfile -File {rel_hook}"
+    return rel_hook
+
 
 def _merge_ignore_file(path: Path, entries: tuple[str, ...]) -> bool:
     """Append missing *entries* to an ignore file. Returns True if changed."""
@@ -106,19 +189,22 @@ def install_shield(
         results[name] = _merge_ignore_file(project_dir / name, IGNORE_ENTRIES)
 
     claude_dir = project_dir / ".claude"
-    hook_path = claude_dir / "hooks" / "ownlock-shield.sh"
+    hook_name = _hook_basename()
+    hook_path = claude_dir / "hooks" / hook_name
     settings_path = claude_dir / "settings.json"
+    hook_body = _hook_script_body()
 
     claude_dir.mkdir(parents=True, exist_ok=True)
     (claude_dir / "hooks").mkdir(parents=True, exist_ok=True)
 
-    if force or not hook_path.exists() or hook_path.read_text(encoding="utf-8") != _HOOK_SCRIPT:
-        hook_path.write_text(_HOOK_SCRIPT, encoding="utf-8")
+    rel_key = f".claude/hooks/{hook_name}"
+    if force or not hook_path.exists() or hook_path.read_text(encoding="utf-8") != hook_body:
+        hook_path.write_text(hook_body, encoding="utf-8")
         if os.name == "posix":
             hook_path.chmod(hook_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        results[".claude/hooks/ownlock-shield.sh"] = True
+        results[rel_key] = True
     else:
-        results[".claude/hooks/ownlock-shield.sh"] = False
+        results[rel_key] = False
 
     settings: dict = {}
     if settings_path.exists():
@@ -139,10 +225,10 @@ def install_shield(
 
     hooks = settings.setdefault("hooks", {})
     pre: list = hooks.setdefault("PreToolUse", [])
-    rel_hook = str(hook_path.relative_to(project_dir))
+    rel_hook = str(hook_path.relative_to(project_dir)).replace("\\", "/")
     hook_entry = {
         "matcher": "Read|Edit|Write|Grep|Search|Glob|Bash",
-        "hooks": [{"type": "command", "command": rel_hook}],
+        "hooks": [{"type": "command", "command": _hook_command(rel_hook)}],
     }
     if hook_entry not in pre:
         pre.append(hook_entry)
@@ -163,9 +249,10 @@ def verify_shield(project_dir: Path) -> list[str]:
         path = project_dir / name
         if not path.exists() or SHIELD_MARKER not in path.read_text(encoding="utf-8"):
             issues.append(f"Missing or incomplete {name}")
-    hook = project_dir / ".claude" / "hooks" / "ownlock-shield.sh"
+    hook_name = _hook_basename()
+    hook = project_dir / ".claude" / "hooks" / hook_name
     if not hook.exists():
-        issues.append("Missing .claude/hooks/ownlock-shield.sh")
+        issues.append(f"Missing .claude/hooks/{hook_name}")
     elif os.name == "posix" and not os.access(hook, os.X_OK):
         issues.append("Hook script is not executable")
     settings = project_dir / ".claude" / "settings.json"
@@ -198,8 +285,21 @@ def verify_shield(project_dir: Path) -> list[str]:
     return issues
 
 
+def _looks_secret_shaped(key: str, value: str) -> bool:
+    """True when key or value resembles a secret (not a short non-secret enum)."""
+    if not value or value.startswith("vault("):
+        return False
+    if _OBVIOUS_NON_SECRET_RE.match(value):
+        return False
+    if _SECRET_KEY_RE.search(key):
+        return len(value) >= 4
+    if _SECRET_VALUE_RE.search(value):
+        return True
+    return False
+
+
 def simulate_agent_env_read(project_dir: Path) -> Optional[str]:
-    """Return a leaked line if a plaintext .env value would be readable."""
+    """Return a leaked line if a plaintext secret-shaped .env value would be readable."""
     for pattern in (".env", ".env.local"):
         env_path = project_dir / pattern
         if not env_path.exists():
@@ -209,8 +309,9 @@ def simulate_agent_env_read(project_dir: Path) -> Optional[str]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#") or "=" not in stripped:
                 continue
-            _, _, val = stripped.partition("=")
+            key, _, val = stripped.partition("=")
+            key = key.strip()
             val = val.strip().strip('"').strip("'")
-            if val and not val.startswith("vault(") and len(val) >= 8:
+            if _looks_secret_shaped(key, val):
                 return f"{env_path.name} contains plaintext value (agent could read it)"
     return None

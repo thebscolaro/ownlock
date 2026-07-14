@@ -5,6 +5,20 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-14
+
+### Fixed
+
+- **Windows console** — ASCII-safe markers (`[x]` / `-`) when stdout cannot encode `✗` / `•`; best-effort UTF-8 `stdout` reconfigure on Windows.
+- **`.gitignore` migration** — legacy `.ownlock/` / `.ownlock` directory rules are removed and replaced with `.ownlock/*` so `!.ownlock/team.olbundle` works.
+- **`shield --verify` heuristic** — plaintext `.env` scan flags secret-shaped keys/values only (no more false positives on `NODE_ENV=development`).
+
+### Added
+
+- **Windows Claude hooks** — `ownlock-shield.ps1` / `ownlock-guard.ps1` wired via `powershell -NoProfile -File` when `os.name == "nt"`.
+- **`share --team` full-export warning** — when no secret names are given, warn that the entire project vault is exported and personal tokens belong in the global vault.
+- README **Team sync vs policies** and **agent support matrix**.
+
 ## [0.3.0] - 2026-07-14
 
 ### Added
