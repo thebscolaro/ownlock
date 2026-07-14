@@ -133,10 +133,14 @@ def _posix_ppid(pid: int) -> Optional[int]:
         pass
     # macOS / BSD fallback via ps
     try:
+        import shutil
         import subprocess
 
+        ps = shutil.which("ps")
+        if not ps:
+            return None
         out = subprocess.check_output(
-            ["ps", "-p", str(pid), "-o", "ppid="],
+            [ps, "-p", str(pid), "-o", "ppid="],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
@@ -148,12 +152,16 @@ def _posix_ppid(pid: int) -> Optional[int]:
 def _posix_ps_comm(pid: int) -> Optional[str]:
     """macOS/BSD: prefer ``command`` (full path) argv0, then ``comm``."""
     try:
+        import shutil
         import subprocess
 
+        ps = shutil.which("ps")
+        if not ps:
+            return None
         for fmt in ("command=", "comm="):
             try:
                 out = subprocess.check_output(
-                    ["ps", "-p", str(pid), "-o", fmt],
+                    [ps, "-p", str(pid), "-o", fmt],
                     text=True,
                     stderr=subprocess.DEVNULL,
                 ).strip()
