@@ -37,14 +37,22 @@ class TestIsEnabled:
         monkeypatch.setenv("OWNLOCK_AUDIT", val)
         assert audit.is_enabled() is True
 
-    @pytest.mark.parametrize("val", ["", "0", "false", "no", "off", "anything-else"])
-    def test_falsy(self, val, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("val", ["", "anything-else"])
+    def test_falsy_or_agent_fallback(self, val, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("OWNLOCK_AUDIT", val)
-        assert audit.is_enabled() is False
+        with patch("ownlock.agent.detect_agent_actor", return_value=None):
+            assert audit.is_enabled() is False
 
-    def test_unset_is_disabled(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("val", ["0", "false", "no", "off"])
+    def test_explicit_off(self, val, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("OWNLOCK_AUDIT", val)
+        with patch("ownlock.agent.detect_agent_actor", return_value="cursor"):
+            assert audit.is_enabled() is False
+
+    def test_auto_enable_when_agent_detected(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("OWNLOCK_AUDIT", raising=False)
-        assert audit.is_enabled() is False
+        with patch("ownlock.agent.detect_agent_actor", return_value="claude-code"):
+            assert audit.is_enabled() is True
 
 
 class TestRecordNoop:
@@ -53,7 +61,8 @@ class TestRecordNoop:
         vault = tmp_path / ".ownlock" / "vault.db"
         vault.parent.mkdir(parents=True)
         vault.touch()
-        wrote = audit.record("set", vault_path=vault, name="X", env="default")
+        with patch("ownlock.agent.detect_agent_actor", return_value=None):
+            wrote = audit.record("set", vault_path=vault, name="X", env="default")
         assert wrote is False
         assert not (vault.parent / "audit.log").exists()
 
@@ -75,7 +84,7 @@ class TestRecordEnabled:
         assert record["op"] == "set"
         assert record["name"] == "API_KEY"
         assert record["env"] == "prod"
-        assert record["actor"] == "ownlock"
+        assert record["actor"] in {"ownlock", "cursor", "claude-code", "codex"}
         assert record["vault"] == str(vault)
         assert "ts" in record
 
@@ -178,7 +187,7 @@ class TestCliIntegration:
         self, vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setenv("OWNLOCK_PASSPHRASE", PASSPHRASE)
-        monkeypatch.delenv("OWNLOCK_AUDIT", raising=False)
+        monkeypatch.setenv("OWNLOCK_AUDIT", "0")  # explicit off (agents auto-enable otherwise)
         monkeypatch.setattr(
             "ownlock.cli._resolve_vault_path",
             lambda global_vault=False, project=False: vault,
