@@ -5,6 +5,27 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-14
+
+### Fixed
+
+- **Windows console** — ASCII-safe markers (`[x]` / `-`) when stdout cannot encode `✗` / `•`; best-effort UTF-8 `stdout` reconfigure on Windows.
+- **`.gitignore` migration** — legacy `.ownlock/` / `.ownlock` directory rules are removed and replaced with `.ownlock/*` so `!.ownlock/team.olbundle` works.
+- **`shield --verify` heuristic** — plaintext `.env` scan flags secret-shaped keys/values only (no more false positives on `NODE_ENV=development` / `CUSTOM_TOKENIZER`).
+- **PowerShell guard hook** — uses explicit process stdin/stdout (async stdout read; stderr not redirected) instead of pipeline enumeration.
+- **Cross-OS Claude hooks** — `install` upserts a single ownlock hook entry; `verify` accepts `.sh` or `.ps1` when settings are wired.
+- **Cursor shield** — `preToolUse` covers all tools (incl. MCP); path haystack includes `target_directory`.
+- **Hermes config merge** — single-quoted YAML paths (Windows-safe); no orphan list items; refreshes stale absolute command paths; path haystack joins all tool fields.
+
+### Added
+
+- **Windows Claude hooks** — `ownlock-shield.ps1` / `ownlock-guard.ps1` wired via `powershell -NoProfile -File` when `os.name == "nt"`.
+- **Cursor `hooks.json`** — `beforeReadFile` / `beforeShellExecution` / `preToolUse` with Cursor deny schema.
+- **Hermes shield emitter** — project scripts + `~/.hermes/config.yaml` marker merge (snippet when Hermes is not installed).
+- **Pi shield emitter** — `.ownlock/pi/ownlock-shield.js` + `.pi/settings.json` `extensions` entry.
+- **`share --team` full-export warning** — when no secret names are given, warn that the entire project vault is exported and personal tokens belong in the global vault.
+- README **Team sync vs policies** and **agent support matrix**.
+
 ## [0.3.0] - 2026-07-14
 
 ### Added

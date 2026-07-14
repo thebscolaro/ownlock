@@ -128,11 +128,13 @@ class TestInit:
     def test_init_migrates_dir_gitignore_and_allows_team_bundle(
         self, tmp_path, monkeypatch
     ):
-        """Legacy .ownlock/ is kept; .ownlock/* is added so negation works."""
+        """Legacy .ownlock/ is removed; .ownlock/* + negation allow team.olbundle."""
+        import shutil
+        import subprocess
+
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.ownlock/\n")
-        project_vault = tmp_path / ".ownlock" / "vault.db"
         monkeypatch.setattr(
             "ownlock.cli.getpass.getpass",
             lambda prompt="": PASSPHRASE,
@@ -141,9 +143,13 @@ class TestInit:
         result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         content = gitignore.read_text()
-        dir_lines = [ln for ln in content.splitlines() if ln.strip() == ".ownlock/"]
+        dir_lines = [
+            ln
+            for ln in content.splitlines()
+            if ln.strip() in {".ownlock/", ".ownlock"}
+        ]
         star_lines = [ln for ln in content.splitlines() if ln.strip() == ".ownlock/*"]
-        assert len(dir_lines) == 1
+        assert dir_lines == []
         assert len(star_lines) == 1
         assert "!.ownlock/team.olbundle" in content
 
@@ -154,6 +160,25 @@ class TestInit:
             ln for ln in gitignore.read_text().splitlines() if ln.strip() == ".ownlock/*"
         ]
         assert len(star_lines2) == 1
+
+        if shutil.which("git"):
+            subprocess.run(
+                ["git", "init"],
+                cwd=tmp_path,
+                check=True,
+                capture_output=True,
+            )
+            (tmp_path / ".ownlock").mkdir(exist_ok=True)
+            bundle = tmp_path / ".ownlock" / "team.olbundle"
+            bundle.write_text("placeholder\n", encoding="utf-8")
+            # Without -v: exit 1 means the path is not ignored (negation worked).
+            check = subprocess.run(
+                ["git", "check-ignore", ".ownlock/team.olbundle"],
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+            )
+            assert check.returncode == 1, check.stdout + check.stderr
 
     def test_first_init_creates_global_and_project_vault(self, tmp_path, monkeypatch):
         """First ownlock init (no global vault yet) creates both global and project vault."""

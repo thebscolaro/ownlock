@@ -13,6 +13,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ownlock.consoleutil import bullet_mark, configure_stdio, fail_mark
+
+configure_stdio()
+
 # Re-export module-level helpers under the cli namespace so existing tests that
 # monkeypatch ``ownlock.cli._is_tty`` / ``ownlock.cli._resolve_vault_path`` /
 # ``ownlock.cli._write_env_backup`` keep working without each test learning
@@ -1835,6 +1839,17 @@ def share(
             console.print("[dim]Vault is empty; nothing to share.[/dim]")
         raise typer.Exit(1)
 
+    if team and not secret_names:
+        console.print(
+            f"[yellow]Warning: exporting all {len(decrypted)} project secret(s) to "
+            f"team.olbundle. Anyone with the bundle passphrase can decrypt them.[/yellow]"
+        )
+        console.print(
+            "[yellow]Keep personal API tokens in the global vault "
+            "(`ownlock set --global`) or pass named secrets: "
+            "`ownlock share DB_URL STRIPE_KEY --team`.[/yellow]"
+        )
+
     bundle_pp = _resolve_bundle_passphrase(confirm=True)
 
     if _is_tty() and not yes and not os.environ.get("OWNLOCK_BUNDLE_PASSPHRASE"):
@@ -2146,22 +2161,27 @@ def shield(
             issues.append(leak)
         if issues:
             for issue in issues:
-                console.print(f"[red]✗ {issue}[/red]")
+                console.print(f"[red]{fail_mark()} {issue}[/red]")
             raise typer.Exit(1)
         console.print("[green]Shield verified — agent secret reads blocked.[/green]")
         return
 
     results = install_shield(directory, force=force)
+    tip = bool(results.pop("hermes_tip", False))
     any_changed = False
     for path, changed in results.items():
         if changed:
             any_changed = True
             console.print(f"[green]Updated {path}[/green]")
-    if not any_changed:
+    if tip:
+        console.print(
+            "[yellow]Hermes: merge .ownlock/hermes-hooks.snippet.yaml into "
+            "~/.hermes/config.yaml (or create ~/.hermes and re-run shield).[/yellow]"
+        )
+    if not any_changed and not tip:
         console.print("[dim]Shield already up to date.[/dim]")
     else:
         console.print("[dim]Run [bold]ownlock shield --verify[/bold] to self-test.[/dim]")
-
 
 @app.command()
 @_safe_command
@@ -2266,7 +2286,7 @@ def status(
     if shield_issues:
         console.print("[bold yellow]Shield[/bold yellow]: incomplete")
         for issue in shield_issues:
-            console.print(f"  [yellow]• {issue}[/yellow]")
+            console.print(f"  [yellow]{bullet_mark()} {issue}[/yellow]")
         console.print("[dim]Run [bold]ownlock shield[/bold] to fix.[/dim]")
     else:
         console.print("[bold green]Shield[/bold green]: ok")

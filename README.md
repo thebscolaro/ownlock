@@ -210,6 +210,38 @@ The bundle uses its own passphrase — independent from your local vault — so 
 
 `ownlock install-hook` writes a `pre-commit` hook (or appends to `.pre-commit-config.yaml`) that runs `ownlock scan` on every commit, so a new dev who pastes a value into a file by mistake gets caught locally.
 
+### Team sync vs policies
+
+**Policies are not how you keep personal API tokens out of GitHub.**
+
+| Feature | Purpose |
+|---------|---------|
+| `share --team` → `.ownlock/team.olbundle` | Encrypted **copy** of project-vault secrets for teammates/CI. Anyone with the **bundle passphrase** can decrypt into their own local vault. |
+| `--policy open\|session\|confirm` | Local **read friction** after a secret is already in *your* vault (agents / `get` / `vault()`). |
+
+Recommended model for “shared services only, not personal tokens”:
+
+- Put **shared** credentials in the **project** vault (what `--team` exports).
+- Keep **personal** API tokens in the **global** vault (`ownlock set --global`) or never in that project vault.
+- Prefer named export: `ownlock share DB_URL STRIPE_KEY --team` instead of bare `share --team` (which dumps **all** project secrets).
+
+```bash
+ownlock share DB_URL STRIPE_KEY --team   # preferred
+ownlock share --team                     # warns: exports entire project vault
+```
+
+### Agent support matrix
+
+| Tool | What ownlock shields today |
+|------|----------------------------|
+| **Claude Code** | `.claudeignore` + `permissions.deny` + native `PreToolUse` / `PostToolUse` hooks (`.sh` on macOS/Linux; `.ps1` via PowerShell on Windows) |
+| **Cursor** | `.cursorignore` + `.cursor/hooks.json` (`beforeReadFile` / `beforeShellExecution` / `preToolUse`) + MCP (`ownlock-mcp`) |
+| **Hermes** | Project scripts under `.ownlock/hooks/` + merge into `~/.hermes/config.yaml` when present (else `.ownlock/hermes-hooks.snippet.yaml`) |
+| **Pi** | `.ownlock/pi/ownlock-shield.js` extension wired via `.pi/settings.json` |
+| **Other agents** | Audit attribution when they call the CLI; use `ownlock run` / MCP so values never land in chat |
+
+On Windows, Git Bash/WSL can still run the `.sh` hooks if you install them manually; the native install path is PowerShell.
+
 ---
 
 ## Upgrading a vault

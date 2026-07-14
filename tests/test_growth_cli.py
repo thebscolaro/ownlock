@@ -72,10 +72,13 @@ class TestShieldGuardStatus:
         assert "REDACTED" in result.output
 
     def test_guard_install_hook(self, tmp_path, monkeypatch):
+        import os
+
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(app, ["guard", "--install-hook", "-C", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        assert (tmp_path / ".claude" / "hooks" / "ownlock-guard.sh").exists()
+        name = "ownlock-guard.ps1" if os.name == "nt" else "ownlock-guard.sh"
+        assert (tmp_path / ".claude" / "hooks" / name).exists()
 
 
 class TestEnsureGitignorePaths:
@@ -88,3 +91,16 @@ class TestEnsureGitignorePaths:
         ensure_gitignore()
         assert gi.read_text().count("!.ownlock/team.olbundle") == 1
         assert gi.read_text().count(".ownlock/*") == 1
+
+    def test_ensure_gitignore_strips_legacy_dir_rule(self, tmp_path, monkeypatch):
+        from ownlock.paths import ensure_gitignore
+
+        monkeypatch.chdir(tmp_path)
+        gi = tmp_path / ".gitignore"
+        gi.write_text("foo\n.ownlock/\n.ownlock\n")
+        ensure_gitignore()
+        text = gi.read_text()
+        assert ".ownlock/" not in {ln.strip() for ln in text.splitlines()}
+        assert ".ownlock" not in {ln.strip() for ln in text.splitlines()}
+        assert ".ownlock/*" in text
+        assert "!.ownlock/team.olbundle" in text
