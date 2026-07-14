@@ -62,3 +62,28 @@ def test_install_guard_hook_windows_uses_ps1(tmp_path: Path, monkeypatch):
     cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     assert cmd.startswith("powershell -NoProfile -File")
     assert "ownlock-guard.ps1" in cmd
+    ps1 = (tmp_path / ".claude" / "hooks" / "ownlock-guard.ps1").read_text()
+    assert "ProcessStartInfo" in ps1
+    assert "$text | &" not in ps1
+    assert "ReadToEndAsync" in ps1
+    assert "RedirectStandardError = $false" in ps1
+
+
+def test_cross_os_guard_upserts_single_posttooluse(tmp_path: Path, monkeypatch):
+    import ownlock.guard as guard
+
+    monkeypatch.setattr(guard.os, "name", "posix")
+    assert guard.install_guard_hook(tmp_path) is True
+    monkeypatch.setattr(guard.os, "name", "nt")
+    assert guard.install_guard_hook(tmp_path) is True
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    ownlock = [
+        e
+        for e in settings["hooks"]["PostToolUse"]
+        if any(
+            "ownlock-guard" in str(h.get("command", ""))
+            for h in (e.get("hooks") or [])
+        )
+    ]
+    assert len(ownlock) == 1
+    assert "ownlock-guard.ps1" in ownlock[0]["hooks"][0]["command"]

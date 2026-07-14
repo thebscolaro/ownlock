@@ -33,6 +33,8 @@ fi
 exit 0
 """
 
+# Explicit Process I/O — never pipe strings through PowerShell enumeration
+# (that turns multi-line output into string[] and can append spurious newlines).
 _GUARD_HOOK_SCRIPT_PS1 = r"""# Installed by `ownlock guard --install-hook` — redacts vault values from tool output.
 $ErrorActionPreference = 'Stop'
 $inputJson = [Console]::In.ReadToEnd()
@@ -51,14 +53,32 @@ if ($null -eq $ownlock) {
 }
 
 try {
-  $redacted = $text | & $ownlock.Source guard --stdin 2>$null
-  if ($LASTEXITCODE -ne 0) { throw 'guard failed' }
+  # Redirect stdout only — redirecting stderr without draining it can deadlock
+  # when the child writes enough to fill the OS pipe buffer.
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $ownlock.Source
+  $psi.Arguments = 'guard --stdin'
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $false
+  $psi.CreateNoWindow = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+  $proc.StandardInput.Write($text)
+  $proc.StandardInput.Close()
+  $proc.WaitForExit()
+  $redacted = [string]$stdoutTask.GetAwaiter().GetResult()
+  if ($proc.ExitCode -ne 0) { throw 'guard failed' }
 } catch {
   Write-Error 'ownlock guard failed; refusing to pass unredacted tool output'
   exit 1
 }
 
-if ($redacted -ne $text) {
+if ($redacted -cne $text) {
   $payload = @{
     hookSpecificOutput = @{
       hookEventName = 'PostToolUse'
@@ -84,6 +104,30 @@ def _hook_command(rel_hook: str) -> str:
         return f"powershell -NoProfile -File {rel_hook}"
     return rel_hook
 
+
+def _entry_commands(entry: dict) -> list[str]:
+    cmds: list[str] = []
+    if isinstance(entry.get("command"), str):
+        cmds.append(entry["command"])
+    for h in entry.get("hooks") or []:
+        if isinstance(h, dict) and isinstance(h.get("command"), str):
+            cmds.append(h["command"])
+    return cmds
+
+
+def _upsert_command_hooks(entries: list, marker: str, new_entry: dict) -> bool:
+    """Replace entries whose command mentions *marker* with *new_entry* (idempotent)."""
+    others: list = []
+    ownlock: list = []
+    for entry in entries:
+        if isinstance(entry, dict) and any(marker in c for c in _entry_commands(entry)):
+            ownlock.append(entry)
+        else:
+            others.append(entry)
+    if len(ownlock) == 1 and ownlock[0] == new_entry:
+        return False
+    entries[:] = others + [new_entry]
+    return True
 
 def redact_text(text: str, secrets: dict[str, str]) -> str:
     """Return *text* with known secrets replaced by placeholders."""
@@ -132,8 +176,7 @@ def install_guard_hook(project_dir: Path, *, force: bool = False) -> bool:
         "matcher": "Read|Edit|Write|Grep|Search|Glob|Bash",
         "hooks": [{"type": "command", "command": _hook_command(rel_hook)}],
     }
-    if entry not in post:
-        post.append(entry)
+    if _upsert_command_hooks(post, "ownlock-guard", entry):
         changed = True
 
     if changed:

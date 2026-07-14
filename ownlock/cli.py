@@ -2167,16 +2167,21 @@ def shield(
         return
 
     results = install_shield(directory, force=force)
+    tip = bool(results.pop("hermes_tip", False))
     any_changed = False
     for path, changed in results.items():
         if changed:
             any_changed = True
             console.print(f"[green]Updated {path}[/green]")
-    if not any_changed:
+    if tip:
+        console.print(
+            "[yellow]Hermes: merge .ownlock/hermes-hooks.snippet.yaml into "
+            "~/.hermes/config.yaml (or create ~/.hermes and re-run shield).[/yellow]"
+        )
+    if not any_changed and not tip:
         console.print("[dim]Shield already up to date.[/dim]")
     else:
         console.print("[dim]Run [bold]ownlock shield --verify[/bold] to self-test.[/dim]")
-
 
 @app.command()
 @_safe_command

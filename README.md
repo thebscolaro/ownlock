@@ -235,7 +235,9 @@ ownlock share --team                     # warns: exports entire project vault
 | Tool | What ownlock shields today |
 |------|----------------------------|
 | **Claude Code** | `.claudeignore` + `permissions.deny` + native `PreToolUse` / `PostToolUse` hooks (`.sh` on macOS/Linux; `.ps1` via PowerShell on Windows) |
-| **Cursor** | `.cursorignore` + MCP (`ownlock-mcp`); Cursor `hooks.json` not wired yet |
+| **Cursor** | `.cursorignore` + `.cursor/hooks.json` (`beforeReadFile` / `beforeShellExecution` / `preToolUse`) + MCP (`ownlock-mcp`) |
+| **Hermes** | Project scripts under `.ownlock/hooks/` + merge into `~/.hermes/config.yaml` when present (else `.ownlock/hermes-hooks.snippet.yaml`) |
+| **Pi** | `.ownlock/pi/ownlock-shield.js` extension wired via `.pi/settings.json` |
 | **Other agents** | Audit attribution when they call the CLI; use `ownlock run` / MCP so values never land in chat |
 
 On Windows, Git Bash/WSL can still run the `.sh` hooks if you install them manually; the native install path is PowerShell.
