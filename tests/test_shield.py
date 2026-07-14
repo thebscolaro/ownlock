@@ -52,8 +52,11 @@ def test_verify_shield_requires_pretooluse_wiring(tmp_path: Path):
 
 
 def test_shield_hook_checks_glob_fields(tmp_path: Path):
+    import os
+
     install_shield(tmp_path)
-    hook = (tmp_path / ".claude" / "hooks" / "ownlock-shield.sh").read_text()
+    name = "ownlock-shield.ps1" if os.name == "nt" else "ownlock-shield.sh"
+    hook = (tmp_path / ".claude" / "hooks" / name).read_text()
     assert "tool_input.pattern" in hook or "pattern" in hook
     assert "path_haystack" in hook.lower() or "Get-PathHaystack" in hook or "path" in hook
 

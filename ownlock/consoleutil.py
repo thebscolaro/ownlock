@@ -16,8 +16,9 @@ def configure_stdio() -> None:
             continue
         try:
             reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except (OSError, ValueError, AttributeError):
+            # Console encoding is best-effort; keep going with the existing stream.
+            continue
 
 
 def console_can_encode(text: str) -> bool:

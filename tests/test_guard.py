@@ -28,8 +28,11 @@ def test_guard_stdin(monkeypatch):
 
 
 def test_install_guard_hook(tmp_path: Path):
+    import os
+
     assert install_guard_hook(tmp_path) is True
-    hook = tmp_path / ".claude" / "hooks" / "ownlock-guard.sh"
+    name = "ownlock-guard.ps1" if os.name == "nt" else "ownlock-guard.sh"
+    hook = tmp_path / ".claude" / "hooks" / name
     assert hook.exists()
     script = hook.read_text()
     assert "refusing to pass unredacted" in script

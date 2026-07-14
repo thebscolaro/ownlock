@@ -72,10 +72,13 @@ class TestShieldGuardStatus:
         assert "REDACTED" in result.output
 
     def test_guard_install_hook(self, tmp_path, monkeypatch):
+        import os
+
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(app, ["guard", "--install-hook", "-C", str(tmp_path)])
         assert result.exit_code == 0, result.output
-        assert (tmp_path / ".claude" / "hooks" / "ownlock-guard.sh").exists()
+        name = "ownlock-guard.ps1" if os.name == "nt" else "ownlock-guard.sh"
+        assert (tmp_path / ".claude" / "hooks" / name).exists()
 
 
 class TestEnsureGitignorePaths:
