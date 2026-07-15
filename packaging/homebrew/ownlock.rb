@@ -7,19 +7,18 @@
 #   brew tap thebscolaro/ownlock
 #   brew install ownlock
 #
-# Points at the latest *published* PyPI release (0.3.1 until 0.3.2 sdist lands).
-# Bump url/sha/version after PyPI publish — see packaging/README.md.
-# Cursor shield on 0.3.1 can lock the agent: upgrade to 0.3.2 and `ownlock shield --force`.
+# Points at the latest *published* PyPI release (0.3.2).
+# Bump url/sha/version when cutting the next release — see packaging/README.md.
 
 class Ownlock < Formula
   include Language::Python::Virtualenv
 
   desc "Cross-platform local secret broker for developers and AI agents"
   homepage "https://github.com/thebscolaro/ownlock"
-  url "https://files.pythonhosted.org/packages/8a/84/8fbff5c2722e60869a6fe464adc36b2575804005a8d476dc7c8c7fd58435/ownlock-0.3.1.tar.gz"
-  sha256 "a6a515d170a6e72cfd459580bb1a16619ed68b317e8698c77455fa703a57b301"
+  url "https://files.pythonhosted.org/packages/fb/6b/638e059e730782d47b7c4459b3030900aa47b65f1baa5bac713fe050263e/ownlock-0.3.2.tar.gz"
+  sha256 "2effedcec0fceea600267695da371e32d027d2c191b334fbca7694b3776c44e6"
   license "MIT"
-  version "0.3.1"
+  version "0.3.2"
 
   depends_on "python@3.12"
 
