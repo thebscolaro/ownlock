@@ -28,8 +28,11 @@ def test_guard_stdin(monkeypatch):
 
 
 def test_install_guard_hook(tmp_path: Path):
+    import os
+
     assert install_guard_hook(tmp_path) is True
-    hook = tmp_path / ".claude" / "hooks" / "ownlock-guard.sh"
+    name = "ownlock-guard.ps1" if os.name == "nt" else "ownlock-guard.sh"
+    hook = tmp_path / ".claude" / "hooks" / name
     assert hook.exists()
     script = hook.read_text()
     assert "refusing to pass unredacted" in script
@@ -50,3 +53,40 @@ def test_install_guard_hook_recovers_bad_settings_json(tmp_path: Path):
     assert install_guard_hook(tmp_path) is True
     data = json.loads((claude / "settings.json").read_text())
     assert "PostToolUse" in data["hooks"]
+
+
+def test_install_guard_hook_windows_uses_ps1(tmp_path: Path, monkeypatch):
+    import ownlock.guard as guard
+
+    monkeypatch.setattr(guard.os, "name", "nt")
+    assert guard.install_guard_hook(tmp_path) is True
+    assert (tmp_path / ".claude" / "hooks" / "ownlock-guard.ps1").exists()
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    cmd = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert cmd.startswith("powershell -NoProfile -File")
+    assert "ownlock-guard.ps1" in cmd
+    ps1 = (tmp_path / ".claude" / "hooks" / "ownlock-guard.ps1").read_text()
+    assert "ProcessStartInfo" in ps1
+    assert "$text | &" not in ps1
+    assert "ReadToEndAsync" in ps1
+    assert "RedirectStandardError = $false" in ps1
+
+
+def test_cross_os_guard_upserts_single_posttooluse(tmp_path: Path, monkeypatch):
+    import ownlock.guard as guard
+
+    monkeypatch.setattr(guard.os, "name", "posix")
+    assert guard.install_guard_hook(tmp_path) is True
+    monkeypatch.setattr(guard.os, "name", "nt")
+    assert guard.install_guard_hook(tmp_path) is True
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    ownlock = [
+        e
+        for e in settings["hooks"]["PostToolUse"]
+        if any(
+            "ownlock-guard" in str(h.get("command", ""))
+            for h in (e.get("hooks") or [])
+        )
+    ]
+    assert len(ownlock) == 1
+    assert "ownlock-guard.ps1" in ownlock[0]["hooks"][0]["command"]
