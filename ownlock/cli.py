@@ -623,13 +623,28 @@ def list_secrets(
         typer.echo(json.dumps(payload, indent=2))
         return
 
+    from ownlock.rotation import age_days, format_age, rotation_days
+
+    stale_after = rotation_days()
     table = Table(title="Secrets")
     table.add_column("Name")
     table.add_column("Env")
     table.add_column("Updated")
+    table.add_column("Age")
+    stale_count = 0
     for s in secrets:
-        table.add_row(s["name"], s["env"], s["updated_at"][:19])
+        age = age_days(s["updated_at"])
+        age_text = format_age(age)
+        if age is not None and age >= stale_after:
+            stale_count += 1
+            age_text = f"[yellow]{age_text}[/yellow]"
+        table.add_row(s["name"], s["env"], s["updated_at"][:19], age_text)
     console.print(table)
+    if stale_count:
+        console.print(
+            f"[yellow]{stale_count} secret(s) not rotated in {stale_after}+ days — "
+            f"run [bold]ownlock set NAME[/bold] to rotate.[/yellow]"
+        )
 
 
 @app.command("doctor")
@@ -2149,10 +2164,52 @@ def scan(
 def shield(
     directory: Path = typer.Argument(Path("."), help="Project directory to harden."),
     verify: bool = typer.Option(False, "--verify", help="Verify shield installation."),
+    selftest: bool = typer.Option(
+        False,
+        "--selftest",
+        help="Execute the installed hook scripts with allow/deny payloads and report results.",
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite hook scripts."),
 ) -> None:
     """Harden a repo against AI agents reading secrets on disk."""
     from ownlock.shield import install_shield, simulate_agent_env_read, verify_shield
+
+    if selftest:
+        from ownlock import hookutil
+
+        results = hookutil.run_selftest(directory)
+        if not results:
+            console.print(
+                "[red]No runnable shield hooks found — run [bold]ownlock shield[/bold] "
+                "first (and ensure bash or PowerShell is on PATH).[/red]"
+            )
+            raise typer.Exit(1)
+
+        table = Table(title="Shield selftest")
+        table.add_column("Agent")
+        table.add_column("Script")
+        table.add_column("Case")
+        table.add_column("Result")
+        failed = 0
+        for r in results:
+            if r.ok:
+                table.add_row(r.agent, r.script, r.case, "[green]pass[/green]")
+            else:
+                failed += 1
+                table.add_row(r.agent, r.script, r.case, f"[red]FAIL — {r.detail}[/red]")
+        console.print(table)
+
+        hookutil.write_selftest_marker(directory, results)
+        if failed:
+            console.print(
+                f"[red]{fail_mark()} {failed}/{len(results)} hook checks failed — "
+                "run [bold]ownlock shield --force[/bold] to refresh hook scripts.[/red]"
+            )
+            raise typer.Exit(1)
+        console.print(
+            f"[green]All {len(results)} hook checks passed — shield hooks answer correctly.[/green]"
+        )
+        return
 
     if verify:
         issues = verify_shield(directory)
@@ -2181,7 +2238,10 @@ def shield(
     if not any_changed and not tip:
         console.print("[dim]Shield already up to date.[/dim]")
     else:
-        console.print("[dim]Run [bold]ownlock shield --verify[/bold] to self-test.[/dim]")
+        console.print(
+            "[dim]Run [bold]ownlock shield --verify[/bold] to check files and "
+            "[bold]ownlock shield --selftest[/bold] to execute the hooks.[/dim]"
+        )
 
 @app.command()
 @_safe_command
@@ -2233,6 +2293,151 @@ def guard(
     raise typer.Exit(1)
 
 
+sync_app = typer.Typer(
+    name="sync",
+    help="Sync vault secrets with external stores (currently GitHub Actions).",
+    no_args_is_help=True,
+)
+gh_app = typer.Typer(
+    name="gh",
+    help="Bridge secrets to GitHub Actions via the gh CLI.",
+    no_args_is_help=True,
+)
+sync_app.add_typer(gh_app)
+app.add_typer(sync_app)
+
+
+@gh_app.command("push")
+@_safe_command
+def sync_gh_push(
+    names: list[str] = typer.Argument(
+        ..., help="Secret names to push (explicit names only, no wildcards)."
+    ),
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Target repository owner/name (default: repo of cwd)."
+    ),
+    gh_env: Optional[str] = typer.Option(
+        None,
+        "--gh-env",
+        help="GitHub Actions environment to store secrets in (gh secret set --env).",
+    ),
+    env: str = typer.Option(
+        "default", "--env", "-e", help="Vault environment to read values from."
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Push named vault secrets to GitHub Actions secrets (values via stdin)."""
+    from ownlock.ghsync import GhSyncError, check_authenticated, push_secret, require_gh
+
+    try:
+        gh = require_gh()
+        check_authenticated(gh)
+    except GhSyncError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            for name in names:
+                value = vm.get(name, env)
+                if value is None:
+                    missing.append(name)
+                else:
+                    values[name] = value
+    if missing:
+        console.print(
+            f"[red]Not in vault (env={env}): {', '.join(missing)} — nothing pushed.[/red]"
+        )
+        raise typer.Exit(1)
+
+    target = repo or "current repository"
+    if gh_env:
+        target += f" (environment: {gh_env})"
+    if not yes:
+        confirmed = typer.confirm(
+            f"Push {len(values)} secret(s) [{', '.join(values)}] to GitHub Actions in {target}?"
+        )
+        if not confirmed:
+            console.print("[dim]Aborted — nothing pushed.[/dim]")
+            raise typer.Exit(1)
+
+    for name, value in values.items():
+        try:
+            push_secret(gh, name, value, repo=repo, gh_env=gh_env)
+        except GhSyncError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        audit.record(
+            "sync-gh-push",
+            vault_path=vault_path,
+            name=name,
+            env=env,
+            extra={"repo": repo, "gh_env": gh_env},
+        )
+        console.print(f"[green]Pushed {name} to GitHub Actions.[/green]")
+    console.print(f"[green]Done — {len(values)} secret(s) pushed to {target}.[/green]")
+
+
+@gh_app.command("pull")
+@_safe_command
+def sync_gh_pull(
+    repo: Optional[str] = typer.Option(
+        None, "--repo", help="Repository owner/name (default: repo of cwd)."
+    ),
+    gh_env: Optional[str] = typer.Option(
+        None, "--gh-env", help="GitHub Actions environment to list (gh secret list --env)."
+    ),
+    env: str = typer.Option(
+        "default", "--env", "-e", help="Vault environment to diff against."
+    ),
+    global_vault: bool = typer.Option(False, "--global", help="Use global vault."),
+    project: bool = typer.Option(False, "--project", help="Use project vault at cwd."),
+) -> None:
+    """Diff GitHub Actions secret names against the vault (names only).
+
+    GitHub never returns secret values, so this cannot import them — it
+    reports which GitHub Actions secrets have no matching name in the vault.
+    """
+    from ownlock.ghsync import GhSyncError, check_authenticated, list_remote_secret_names, require_gh
+
+    try:
+        gh = require_gh()
+        check_authenticated(gh)
+        remote_names = list_remote_secret_names(gh, repo=repo, gh_env=gh_env)
+    except GhSyncError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
+    with passphrase_session() as passphrase:
+        with VaultManager(vault_path, passphrase) as vm:
+            local_names = {s["name"] for s in vm.list_secrets(env)}
+
+    if not remote_names:
+        console.print("[dim]No GitHub Actions secrets found.[/dim]")
+        return
+
+    missing = [n for n in remote_names if n not in local_names]
+    present = [n for n in remote_names if n in local_names]
+    if present:
+        console.print(f"[green]In vault: {', '.join(present)}[/green]")
+    if missing:
+        console.print(
+            f"[yellow]On GitHub but not in vault (env={env}): {', '.join(missing)}[/yellow]"
+        )
+        console.print(
+            "[dim]GitHub cannot return secret values — re-add these with "
+            "[bold]ownlock set NAME[/bold] from their original source.[/dim]"
+        )
+    else:
+        console.print("[green]All GitHub Actions secret names exist in the vault.[/green]")
+
+
 @app.command()
 @_safe_command
 def status(
@@ -2249,8 +2454,11 @@ def status(
     # Always evaluate shield for the cwd project — never $HOME when using global vault.
     project_dir = Path.cwd()
 
+    from ownlock.hookutil import selftest_passed
+
     agent = detect_agent_actor()
     shield_issues = verify_shield(project_dir)
+    selftest_ok = selftest_passed(project_dir)
     audit_on = audit.is_enabled()
 
     secret_count = 0
@@ -2271,6 +2479,7 @@ def status(
         "audit_enabled": audit_on,
         "shield_ok": len(shield_issues) == 0,
         "shield_issues": shield_issues,
+        "shield_selftest_ok": selftest_ok,
     }
 
     if as_json:
@@ -2290,5 +2499,10 @@ def status(
         console.print("[dim]Run [bold]ownlock shield[/bold] to fix.[/dim]")
     else:
         console.print("[bold green]Shield[/bold green]: ok")
+        if not selftest_ok:
+            console.print(
+                "[dim]Tip: run [bold]ownlock shield --selftest[/bold] once to "
+                "execute the installed hooks against allow/deny payloads.[/dim]"
+            )
 
 

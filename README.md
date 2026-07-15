@@ -242,6 +242,8 @@ ownlock share --team                     # warns: exports entire project vault
 
 On Windows, Git Bash/WSL can still run the `.sh` hooks if you install them manually; the native install path is PowerShell.
 
+After installing, run `ownlock shield --selftest` to actually **execute** the installed hook scripts against a matrix of allow/deny payloads (benign reads, `.env` reads, `.ownlock` paths, shell commands, malformed input) and confirm each one answers correctly on your machine.
+
 ---
 
 ## Upgrading a vault
@@ -384,8 +386,10 @@ Example: `web.config` stays untouched and relies on standard transforms for `Log
 | `ownlock init --global` | Create global vault only |
 | `ownlock set KEY` / `KEY=VALUE` | Store secret. `--from-file PATH`, `--editor` for multi-line values |
 | `ownlock get KEY` | Print decrypted value |
-| `ownlock list` | List secret names (`--json` for machine-readable metadata, no values) |
-| `ownlock doctor` | Environment diagnostics (versions, vault paths, KDF status, `--json`) |
+| `ownlock list` | List secret names with age (`--json` for machine-readable metadata, no values). Secrets older than 90 days (`OWNLOCK_ROTATION_DAYS`) are flagged for rotation |
+| `ownlock doctor` | Environment diagnostics (versions, vault paths, KDF status, rotation nudge, `--json`) |
+| `ownlock sync gh push NAMES` | Push named secrets to GitHub Actions via `gh secret set` (values piped over stdin, never argv). `--repo`, `--gh-env`, `--yes` |
+| `ownlock sync gh pull` | Names-only diff of GitHub Actions secrets vs the vault (GitHub cannot return values) |
 | `ownlock delete KEY` | Remove a secret |
 | `ownlock rekey` | Re-encrypt at current KDF (`--upgrade-kdf`) and/or rotate passphrase (`--rotate-passphrase`) |
 | `ownlock run -- CMD` | Resolve `.env`, inject secrets, redact stdout |
