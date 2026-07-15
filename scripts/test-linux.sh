@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE="${OWNLOCK_TEST_IMAGE:-python:3.12-bookworm}"
+IMAGE="${OWNLOCK_TEST_IMAGE:-python:3.12-slim-bookworm}"
 PYTEST_ARGS=${*:-tests/ -q -m "not smoke"}
 
 ENGINE=""
@@ -31,15 +31,28 @@ fi
 
 echo "Using $ENGINE with $IMAGE"
 # Mount the repo read-write so editable install + .pyc/caches can write under /src.
-# Install jq so the bash shield hooks match a typical agent environment.
+# Install jq as a static binary (avoids apt I/O issues in some Desktop VMs).
 exec "$ENGINE" run --rm -t \
   -v "$ROOT:/src:Z" \
   -w /src \
   "$IMAGE" \
   bash -lc "
     set -euo pipefail
-    apt-get update -qq
-    apt-get install -y -qq jq >/dev/null
+    if ! command -v jq >/dev/null 2>&1; then
+      python - <<'PY'
+import pathlib, stat, sys, urllib.request
+arch = {\"aarch64\": \"arm64\", \"arm64\": \"arm64\", \"x86_64\": \"amd64\", \"amd64\": \"amd64\"}.get(
+    __import__(\"os\").uname().machine
+)
+if not arch:
+    sys.exit(f\"unsupported arch for jq: {__import__('os').uname().machine}\")
+url = f\"https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-{arch}\"
+dest = pathlib.Path(\"/usr/local/bin/jq\")
+urllib.request.urlretrieve(url, dest)
+dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+print(f\"installed jq ({arch}) -> {dest}\")
+PY
+    fi
     python -m pip install -q --upgrade 'pip>=26'
     pip install -q -e '.[mcp,dev]'
     pip install -q pytest
