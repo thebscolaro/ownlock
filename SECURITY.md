@@ -54,3 +54,8 @@ CI and GitHub Actions hardening (pinned actions, OIDC publish, fork PR policy) a
 - The system keyring can be accessed by other applications running as the same user.
 - When git is not available on `PATH`, `ownlock render`'s gitignore safety check falls back to a best-effort fnmatch scan that does not implement full gitignore semantics (negation, anchored `**` patterns, `.git/info/exclude`). Installing git enables full semantics via `git check-ignore`.
 - KDF iterations are a defense in depth, not a substitute for a strong passphrase. With a low-entropy passphrase, even 600,000 PBKDF2 iterations are recoverable on cloud GPUs in days. Use a 4-word passphrase or longer.
+- **Shield hooks** deny by substring/path match on the tool payload (`file_path`, `command`, etc.). Accepted gaps (OS-level, not in scope for the hook):
+  - A **symlink** whose name is innocuous but whose target is `.env` / `.ownlock` — the hook only sees the path string the agent was given
+  - Encoding tricks that never materialize as the literal substring `.env` / `.ownlock` in the payload (e.g. hex/`$'\x2eenv'` that the shell expands after the hook runs)
+  - Cases intentionally **allowed**: `foo.env`, `.environment`, `prevent.envy` (not dotenv / vault paths)
+- Hook deny rules are case-insensitive (`.ENV` / `.Env` denied) because macOS and Windows treat those as `.env` on disk.

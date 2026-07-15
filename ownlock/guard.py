@@ -8,6 +8,10 @@ import stat
 import sys
 from pathlib import Path
 
+from ownlock.hookutil import (
+    hook_command as _hook_command,
+    upsert_command_hooks as _upsert_command_hooks,
+)
 from ownlock.redactor import SecretRedactor
 
 SHIELD_MARKER = "# ownlock-guard"
@@ -98,36 +102,6 @@ def _hook_basename() -> str:
 def _hook_script_body() -> str:
     return _GUARD_HOOK_SCRIPT_PS1 if os.name == "nt" else _GUARD_HOOK_SCRIPT
 
-
-def _hook_command(rel_hook: str) -> str:
-    if os.name == "nt":
-        return f"powershell -NoProfile -File {rel_hook}"
-    return rel_hook
-
-
-def _entry_commands(entry: dict) -> list[str]:
-    cmds: list[str] = []
-    if isinstance(entry.get("command"), str):
-        cmds.append(entry["command"])
-    for h in entry.get("hooks") or []:
-        if isinstance(h, dict) and isinstance(h.get("command"), str):
-            cmds.append(h["command"])
-    return cmds
-
-
-def _upsert_command_hooks(entries: list, marker: str, new_entry: dict) -> bool:
-    """Replace entries whose command mentions *marker* with *new_entry* (idempotent)."""
-    others: list = []
-    ownlock: list = []
-    for entry in entries:
-        if isinstance(entry, dict) and any(marker in c for c in _entry_commands(entry)):
-            ownlock.append(entry)
-        else:
-            others.append(entry)
-    if len(ownlock) == 1 and ownlock[0] == new_entry:
-        return False
-    entries[:] = others + [new_entry]
-    return True
 
 def redact_text(text: str, secrets: dict[str, str]) -> str:
     """Return *text* with known secrets replaced by placeholders."""

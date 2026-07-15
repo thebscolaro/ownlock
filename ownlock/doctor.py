@@ -42,6 +42,7 @@ def mcp_importable() -> bool:
         return False
 from ownlock.backups import LEGACY_BACKUP_SUFFIX
 from ownlock.crypto import KDF_ITERATIONS_CURRENT
+from ownlock.rotation import age_days, rotation_days
 from ownlock.vault import VaultManager
 
 
@@ -89,6 +90,13 @@ def vault_health(vault_path: Path) -> dict[str, Any]:
             secret_count = conn.execute("SELECT COUNT(*) AS n FROM secrets").fetchone()["n"]
         except sqlite3.OperationalError:
             secret_count = 0
+        try:
+            updated_ats = [
+                row["updated_at"]
+                for row in conn.execute("SELECT updated_at FROM secrets").fetchall()
+            ]
+        except sqlite3.OperationalError:
+            updated_ats = []
         conn.close()
     except sqlite3.DatabaseError as e:
         info["error"] = str(e)
@@ -103,6 +111,11 @@ def vault_health(vault_path: Path) -> dict[str, Any]:
             "kdf_iterations": kdf_iterations,
             "kdf_stale": kdf_iterations < KDF_ITERATIONS_CURRENT,
             "secret_count": secret_count,
+            "stale_rotation_count": sum(
+                1
+                for ts in updated_ats
+                if (age := age_days(ts)) is not None and age >= rotation_days()
+            ),
         }
     )
     return info
@@ -162,6 +175,7 @@ def gather_doctor_state() -> dict[str, Any]:
         "ownlock_passphrase_env_set": bool(os.environ.get("OWNLOCK_PASSPHRASE")),
         "passphrase_source": passphrase_source(),
         "mcp_importable": mcp_importable(),
+        "rotation_days": rotation_days(),
     }
     try:
         from ownlock.keyring_util import keyring_has_passphrase
@@ -239,6 +253,17 @@ def render_doctor_report(state: dict[str, Any], console: Console) -> None:
             "[yellow].gitignore does not cover .ownlock/* — run "
             "[bold]ownlock init[/bold] in this directory or add the entry "
             "manually (use .ownlock/* so !.ownlock/team.olbundle can be committed).[/yellow]"
+        )
+
+    stale_rotation = state["global_vault"].get("stale_rotation_count", 0) + state[
+        "project_vault"
+    ].get("stale_rotation_count", 0)
+    if stale_rotation:
+        threshold = state.get("rotation_days", 90)
+        console.print(
+            f"[yellow]{stale_rotation} secret(s) not rotated in {threshold}+ days — "
+            f"run [bold]ownlock set NAME[/bold] to rotate (threshold: "
+            f"OWNLOCK_ROTATION_DAYS).[/yellow]"
         )
 
     stale_global = state["global_vault"].get("kdf_stale")

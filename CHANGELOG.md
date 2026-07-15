@@ -5,6 +5,28 @@ All notable changes to ownlock will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-07-15
+
+### Critical
+
+- **Cursor shield hooks can lock the agent on 0.3.1.** Fail-closed Cursor hooks emitted empty stdout on allow, so Cursor treated every tool call as a hook failure. **Upgrade to 0.3.2 and re-run `ownlock shield --force`** to refresh installed scripts.
+
+### Fixed
+
+- **Cursor hooks always answer** — every exit path prints `{"permission":"allow"}` or deny JSON; jq is optional for parsing (raw-text fallback); no `set -e` before answer.
+- **Claude bash hooks** — tolerant of malformed JSON / missing jq under explicit error handling.
+- **no-jq false deny** — path scan treats JSON quotes as delimiters; shell word-boundary rule only applies to extracted commands.
+- **Selftest status** — `ownlock status` only treats selftest as OK when `failed == 0`.
+
+### Added
+
+- **`ownlock shield --selftest`** — executes installed hook scripts against an allow/deny (+ red-team) matrix.
+- **Hook execution harness** — `tests/test_hook_exec.py` + shared `ownlock/hookutil.py` (also used by selftest).
+- **Rotation reminders** — `ownlock list` Age column; `ownlock doctor` nudge for secrets older than 90 days (`OWNLOCK_ROTATION_DAYS`).
+- **`ownlock sync gh push|pull`** — push named vault secrets to GitHub Actions via `gh secret set` (values on stdin); pull is names-only.
+- **`scripts/test-linux.sh`** — run the suite in podman/docker (Linux only).
+- **cryptography>=48.0.1** — floor for OpenSSL wheel advisory (GHSA-537c-gmf6-5ccf).
+
 ## [0.3.1] - 2026-07-14
 
 ### Fixed

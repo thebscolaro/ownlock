@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ownlock"
-version = "0.3.1"
+version = "0.3.2"
 description = "Lightweight secrets manager — encrypted vault, env injection, stdout redaction. Optional MCP (stdio) delegates to CLI. No Docker, no cloud account."
 readme = "README.md"
 license = "MIT"
@@ -23,7 +23,9 @@ classifiers = [
 dependencies = [
     "typer>=0.15.0",
     "rich>=13.0",
-    "cryptography>=46.0.6",
+    # >=48.0.1: wheels before that ship a vulnerable statically-linked OpenSSL
+    # (GHSA-537c-gmf6-5ccf / CVE-2026-34180).
+    "cryptography>=48.0.1",
     "keyring>=25.0",
     "pygments>=2.20",
 ]

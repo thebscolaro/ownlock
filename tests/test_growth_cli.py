@@ -54,6 +54,25 @@ class TestShieldGuardStatus:
         verify = runner.invoke(app, ["shield", str(tmp_path), "--verify"])
         assert verify.exit_code == 0, verify.output
 
+    def test_shield_selftest(self, tmp_path, monkeypatch):
+        from ownlock import hookutil
+
+        if hookutil.find_bash() is None and hookutil.find_powershell() is None:
+            pytest.skip("no hook interpreter available")
+        monkeypatch.chdir(tmp_path)
+        install = runner.invoke(app, ["shield", str(tmp_path)])
+        assert install.exit_code == 0, install.output
+        result = runner.invoke(app, ["shield", str(tmp_path), "--selftest"])
+        assert result.exit_code == 0, result.output
+        assert "hook checks passed" in result.output
+        assert (tmp_path / ".ownlock" / "selftest.json").exists()
+
+    def test_shield_selftest_without_install_fails(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["shield", str(tmp_path), "--selftest"])
+        assert result.exit_code == 1
+        assert "No runnable shield hooks" in result.output
+
     def test_status_json(self, project_vault, monkeypatch):
         monkeypatch.setattr("ownlock.agent.detect_agent_actor", lambda: None)
         result = runner.invoke(app, ["status", "--json"])
@@ -62,6 +81,7 @@ class TestShieldGuardStatus:
         assert payload["vault_exists"] is True
         assert payload["secret_count"] >= 1
         assert "shield_ok" in payload
+        assert payload["shield_selftest_ok"] is False
 
     def test_guard_stdin_all_envs(self, project_vault, monkeypatch):
         result = runner.invoke(

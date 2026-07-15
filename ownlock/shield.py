@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 from pathlib import Path
 from typing import Optional
+
+from ownlock.hookutil import (
+    hook_command as _hook_command,
+    upsert_command_hooks as _upsert_command_hooks,
+    write_script as _write_script,
+)
 
 SHIELD_MARKER = "# ownlock-shield"
 HERMES_BEGIN = "# ownlock-shield-begin"
@@ -50,44 +55,66 @@ _SECRET_VALUE_RE = re.compile(
 
 _HOOK_SCRIPT = """#!/usr/bin/env bash
 # Installed by `ownlock shield` — blocks agent tools from reading .env / .ownlock.
-set -euo pipefail
-INPUT=$(cat)
-TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+# No `set -e` — parse noise must not kill the script before a decision.
+set -uo pipefail
+INPUT=$(cat 2>/dev/null || true)
 deny() {
-  jq -n --arg reason "$1" \\
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+  # Prefer jq for JSON encoding; fall back to printf (reasons are fixed strings).
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --arg reason "$1" \\
+      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+  else
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\\n' "$1"
+  fi
   exit 0
 }
-# Paths may appear as file_path, path, pattern (Glob), or target_directory.
-path_haystack() {
-  echo "$INPUT" | jq -r '
-    [
-      .tool_input.file_path // empty,
-      .tool_input.path // empty,
-      .tool_input.pattern // empty,
-      .tool_input.glob // empty,
-      .tool_input.target_directory // empty
-    ] | map(select(length > 0)) | join("\\n")
-  ' 2>/dev/null || true
+looks_blocked() {
+  local hay="$1"
+  if printf '%s' "$hay" | grep -qiE '(^|[/\\\\"])\\.env([.]|$|/|\\\\|")|(^|[/\\\\"])\\.env$' 2>/dev/null; then
+    return 0
+  fi
+  if printf '%s' "$hay" | grep -qiE '(^|[/\\\\"])\\.ownlock([/\\\\]|"|$)' 2>/dev/null; then
+    return 0
+  fi
+  # Token match: rejects "cat .env" but not "foo.env" (letter before the dot).
+  if printf '%s' "$hay" | grep -qiE '(^|[^[:alnum:]_])\\.env\\b|\\.ownlock' 2>/dev/null; then
+    return 0
+  fi
+  return 1
 }
-case "$TOOL" in
-  Read|Edit|Write|Grep|Search|Glob)
-    FILE=$(path_haystack)
-    # Match .env, .env.*, paths containing /.env, and Windows-style \\\\.env
-    if echo "$FILE" | grep -qE '(^|[/\\\\])\\.env([.]|$|/|\\\\)|(^|[/\\\\])\\.env$' 2>/dev/null; then
-      deny "ownlock shield: .env files are blocked"
-    fi
-    if echo "$FILE" | grep -qE '(^|[/\\\\])\\.ownlock([/\\\\]|$)' 2>/dev/null; then
-      deny "ownlock shield: .ownlock/ is blocked"
-    fi
-    ;;
-  Bash)
-    CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-    if echo "$CMD" | grep -qE '\\.env\\b|\\.ownlock' 2>/dev/null; then
-      deny "ownlock shield: shell access to .env/.ownlock is blocked"
-    fi
-    ;;
-esac
+if command -v jq >/dev/null 2>&1; then
+  TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
+  path_haystack() {
+    printf '%s' "$INPUT" | jq -r '
+      [
+        .tool_input.file_path // empty,
+        .tool_input.path // empty,
+        .tool_input.pattern // empty,
+        .tool_input.glob // empty,
+        .tool_input.target_directory // empty
+      ] | map(select(length > 0)) | join("\\n")
+    ' 2>/dev/null || true
+  }
+  case "$TOOL" in
+    Read|Edit|Write|Grep|Search|Glob)
+      FILE=$(path_haystack)
+      if looks_blocked "$FILE"; then
+        deny "ownlock shield: .env files are blocked"
+      fi
+      ;;
+    Bash)
+      CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+      if printf '%s' "$CMD" | grep -qiE '\\.env\\b|\\.ownlock' 2>/dev/null; then
+        deny "ownlock shield: shell access to .env/.ownlock is blocked"
+      fi
+      ;;
+  esac
+else
+  # No jq: deny-on-match over the raw payload (still answers).
+  if looks_blocked "$INPUT"; then
+    deny "ownlock shield: .env/.ownlock access is blocked"
+  fi
+fi
 exit 0
 """
 
@@ -145,77 +172,110 @@ exit 0
 
 _CURSOR_HOOK_SH = """#!/usr/bin/env bash
 # Installed by `ownlock shield` — Cursor hooks (beforeReadFile / beforeShellExecution / preToolUse).
-set -euo pipefail
-INPUT=$(cat)
+# Cursor wires this fail-closed, so EVERY exit path must print a permission
+# JSON on stdout: silence would block all tool calls. No `set -e` — a parse
+# hiccup must never kill the script before it answers. jq is optional: with
+# no jq we deny on a conservative raw-text scan instead of failing closed.
+set -u
+allow() {
+  printf '{"permission":"allow"}\\n'
+  exit 0
+}
 deny() {
-  jq -n --arg msg "$1" '{permission: "deny", user_message: $msg}'
+  printf '{"permission":"deny","user_message":"%s"}\\n' "$1"
   exit 2
 }
-FILE=$(echo "$INPUT" | jq -r '
-  [
-    .file_path // empty,
-    .path // empty,
-    .cwd // empty,
-    .working_directory // empty,
-    .tool_input.file_path // empty,
-    .tool_input.path // empty,
-    .tool_input.pattern // empty,
-    .tool_input.glob // empty,
-    .tool_input.target_directory // empty,
-    .tool_input.cwd // empty,
-    .tool_input.working_directory // empty
-  ] | map(select(length > 0)) | join("\n")
-' 2>/dev/null || true)
-CMD=$(echo "$INPUT" | jq -r '.command // .tool_input.command // empty' 2>/dev/null || true)
-HAY="${FILE}"$'\\n'"${CMD}"
-if echo "$HAY" | grep -qE '(^|[/\\\\])\\.env([.]|$|/|\\\\)|(^|[/\\\\])\\.env$' 2>/dev/null; then
+INPUT=$(cat 2>/dev/null || true)
+if [ -z "$INPUT" ]; then
+  allow
+fi
+if command -v jq >/dev/null 2>&1; then
+  HAY=$(printf '%s' "$INPUT" | jq -r '
+    [
+      .file_path // empty,
+      .path // empty,
+      .cwd // empty,
+      .working_directory // empty,
+      .tool_input.file_path // empty,
+      .tool_input.path // empty,
+      .tool_input.pattern // empty,
+      .tool_input.glob // empty,
+      .tool_input.target_directory // empty,
+      .tool_input.cwd // empty,
+      .tool_input.working_directory // empty
+    ] | map(select(length > 0)) | join("\n")
+  ' 2>/dev/null || true)
+  CMD=$(printf '%s' "$INPUT" | jq -r '.command // .tool_input.command // empty' 2>/dev/null || true)
+  HAY="${HAY}"$'\\n'"${CMD}"
+else
+  # No jq: path-style + token scan over the raw JSON text. Token rule uses
+  # a non-alnum boundary so "foo.env" is allowed while "cat .env" is denied.
+  HAY="$INPUT"
+  CMD=""
+fi
+if printf '%s' "$HAY" | grep -qiE '(^|[/\\\\"])\\.env([.]|$|/|\\\\|")|(^|[/\\\\"])\\.env$' 2>/dev/null; then
   deny "ownlock shield: .env files are blocked"
 fi
-if echo "$HAY" | grep -qE '(^|[/\\\\])\\.ownlock([/\\\\]|$)' 2>/dev/null; then
+if printf '%s' "$HAY" | grep -qiE '(^|[/\\\\"])\\.ownlock([/\\\\]|"|$)' 2>/dev/null; then
   deny "ownlock shield: .ownlock/ is blocked"
 fi
-if echo "$CMD" | grep -qE '\\.env\\b|\\.ownlock' 2>/dev/null; then
+if [ -n "$CMD" ] && printf '%s' "$CMD" | grep -qiE '\\.env\\b|\\.ownlock' 2>/dev/null; then
   deny "ownlock shield: shell access to .env/.ownlock is blocked"
 fi
-exit 0
+# When jq is missing, CMD is empty — still catch shell commands in the raw payload.
+if [ -z "$CMD" ] && printf '%s' "$HAY" | grep -qiE '(^|[^[:alnum:]_])\\.env\\b|\\.ownlock' 2>/dev/null; then
+  deny "ownlock shield: shell access to .env/.ownlock is blocked"
+fi
+allow
 """
 
 _CURSOR_HOOK_PS1 = r"""# Installed by `ownlock shield` — Cursor hooks.
-$ErrorActionPreference = 'Stop'
-$inputJson = [Console]::In.ReadToEnd()
-if ([string]::IsNullOrWhiteSpace($inputJson)) { exit 0 }
-try { $obj = $inputJson | ConvertFrom-Json } catch { exit 0 }
-
-function Deny-Cursor([string]$Msg) {
-  (@{ permission = 'deny'; user_message = $Msg } | ConvertTo-Json -Compress)
+# Cursor wires this fail-closed, so EVERY exit path must print a permission
+# JSON on stdout: silence would block all tool calls. The decision is
+# computed inside try/catch and emitted at the very end so no throw (or
+# parse error) can terminate the script before it answers.
+$ErrorActionPreference = 'Continue'
+$denyMessage = $null
+try {
+  $inputJson = [Console]::In.ReadToEnd()
+  if (-not [string]::IsNullOrWhiteSpace($inputJson)) {
+    $obj = $null
+    try { $obj = $inputJson | ConvertFrom-Json } catch { $obj = $null }
+    if ($null -ne $obj) {
+      $parts = @()
+      foreach ($name in @('file_path', 'path', 'cwd', 'working_directory')) {
+        if ($null -ne $obj.$name -and "$($obj.$name)".Length -gt 0) { $parts += [string]$obj.$name }
+      }
+      if ($null -ne $obj.tool_input) {
+        foreach ($name in @('file_path', 'path', 'pattern', 'glob', 'target_directory', 'cwd', 'working_directory')) {
+          $val = $obj.tool_input.$name
+          if ($null -ne $val -and "$val".Length -gt 0) { $parts += [string]$val }
+        }
+      }
+      $cmd = ''
+      if ($null -ne $obj.command) { $cmd = [string]$obj.command }
+      elseif ($null -ne $obj.tool_input -and $null -ne $obj.tool_input.command) {
+        $cmd = [string]$obj.tool_input.command
+      }
+      $hay = ($parts + @($cmd)) -join "`n"
+      if ($hay -match '(^|[/\\])\.env([.]|$|/|\\)|(^|[/\\])\.env$') {
+        $denyMessage = 'ownlock shield: .env files are blocked'
+      } elseif ($hay -match '(^|[/\\])\.ownlock([/\\]|$)') {
+        $denyMessage = 'ownlock shield: .ownlock/ is blocked'
+      } elseif ($cmd -match '\.env\b|\.ownlock') {
+        $denyMessage = 'ownlock shield: shell access to .env/.ownlock is blocked'
+      }
+    }
+  }
+} catch {
+  # Deny-on-match only: unexpected errors answer allow rather than lock the agent.
+  $denyMessage = $null
+}
+if ($null -ne $denyMessage) {
+  (@{ permission = 'deny'; user_message = $denyMessage } | ConvertTo-Json -Compress)
   exit 2
 }
-
-$parts = @()
-foreach ($name in @('file_path', 'path', 'cwd', 'working_directory')) {
-  if ($null -ne $obj.$name -and "$($obj.$name)".Length -gt 0) { $parts += [string]$obj.$name }
-}
-if ($null -ne $obj.tool_input) {
-  foreach ($name in @('file_path', 'path', 'pattern', 'glob', 'target_directory', 'cwd', 'working_directory')) {
-    $val = $obj.tool_input.$name
-    if ($null -ne $val -and "$val".Length -gt 0) { $parts += [string]$val }
-  }
-}
-$cmd = ''
-if ($null -ne $obj.command) { $cmd = [string]$obj.command }
-elseif ($null -ne $obj.tool_input -and $null -ne $obj.tool_input.command) {
-  $cmd = [string]$obj.tool_input.command
-}
-$hay = ($parts + @($cmd)) -join "`n"
-if ($hay -match '(^|[/\\])\.env([.]|$|/|\\)|(^|[/\\])\.env$') {
-  Deny-Cursor 'ownlock shield: .env files are blocked'
-}
-if ($hay -match '(^|[/\\])\.ownlock([/\\]|$)') {
-  Deny-Cursor 'ownlock shield: .ownlock/ is blocked'
-}
-if ($cmd -match '\.env\b|\.ownlock') {
-  Deny-Cursor 'ownlock shield: shell access to .env/.ownlock is blocked'
-}
+Write-Output '{"permission":"allow"}'
 exit 0
 """
 
@@ -238,13 +298,13 @@ FILE=$(echo "$INPUT" | jq -r '
 ' 2>/dev/null || true)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 HAY="${FILE}"$'\\n'"${CMD}"
-if echo "$HAY" | grep -qE '(^|[/\\\\])\\.env([.]|$|/|\\\\)|(^|[/\\\\])\\.env$' 2>/dev/null; then
+if echo "$HAY" | grep -qiE '(^|[/\\\\])\\.env([.]|$|/|\\\\)|(^|[/\\\\])\\.env$' 2>/dev/null; then
   deny "ownlock shield: .env files are blocked"
 fi
-if echo "$HAY" | grep -qE '(^|[/\\\\])\\.ownlock([/\\\\]|$)' 2>/dev/null; then
+if echo "$HAY" | grep -qiE '(^|[/\\\\])\\.ownlock([/\\\\]|$)' 2>/dev/null; then
   deny "ownlock shield: .ownlock/ is blocked"
 fi
-if echo "$CMD" | grep -qE '\\.env\\b|\\.ownlock' 2>/dev/null; then
+if echo "$CMD" | grep -qiE '\\.env\\b|\\.ownlock' 2>/dev/null; then
   deny "ownlock shield: shell access to .env/.ownlock is blocked"
 fi
 printf '{}\\n'
@@ -292,13 +352,13 @@ _PI_EXTENSION_JS = r"""// Installed by `ownlock shield` — Pi extension (tool_c
 function looksBlocked(hay) {
   if (!hay) return null;
   const s = String(hay);
-  if (/(^|[/\\])\.env([.]|$|[/\\])|(^|[/\\])\.env$/.test(s)) {
+  if (/(^|[/\\])\.env([.]|$|[/\\])|(^|[/\\])\.env$/i.test(s)) {
     return "ownlock shield: .env files are blocked";
   }
-  if (/(^|[/\\])\.ownlock([/\\]|$)/.test(s)) {
+  if (/(^|[/\\])\.ownlock([/\\]|$)/i.test(s)) {
     return "ownlock shield: .ownlock/ is blocked";
   }
-  if (/\.env\b|\.ownlock/.test(s)) {
+  if (/\.env\b|\.ownlock/i.test(s)) {
     return "ownlock shield: shell access to .env/.ownlock is blocked";
   }
   return null;
@@ -337,12 +397,6 @@ def _claude_hook_body() -> str:
     return _HOOK_SCRIPT_PS1 if os.name == "nt" else _HOOK_SCRIPT
 
 
-def _hook_command(rel_hook: str) -> str:
-    if os.name == "nt":
-        return f"powershell -NoProfile -File {rel_hook}"
-    return rel_hook
-
-
 def _cursor_hook_rel() -> str:
     name = "ownlock-shield.ps1" if os.name == "nt" else "ownlock-shield.sh"
     return f".cursor/hooks/{name}"
@@ -351,40 +405,6 @@ def _cursor_hook_rel() -> str:
 def _hermes_hook_basename() -> str:
     return "ownlock-hermes-shield.ps1" if os.name == "nt" else "ownlock-hermes-shield.sh"
 
-
-def _write_script(path: Path, body: str, *, force: bool) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not force and path.exists() and path.read_text(encoding="utf-8") == body:
-        return False
-    path.write_text(body, encoding="utf-8")
-    if os.name == "posix" and path.suffix == ".sh":
-        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return True
-
-
-def _entry_commands(entry: dict) -> list[str]:
-    cmds: list[str] = []
-    if isinstance(entry.get("command"), str):
-        cmds.append(entry["command"])
-    for h in entry.get("hooks") or []:
-        if isinstance(h, dict) and isinstance(h.get("command"), str):
-            cmds.append(h["command"])
-    return cmds
-
-
-def _upsert_command_hooks(entries: list, marker: str, new_entry: dict) -> bool:
-    """Replace entries whose command mentions *marker* with *new_entry* (idempotent)."""
-    others: list = []
-    ownlock: list = []
-    for entry in entries:
-        if isinstance(entry, dict) and any(marker in c for c in _entry_commands(entry)):
-            ownlock.append(entry)
-        else:
-            others.append(entry)
-    if len(ownlock) == 1 and ownlock[0] == new_entry:
-        return False
-    entries[:] = others + [new_entry]
-    return True
 
 def _remove_marker_block(text: str, begin: str, end: str) -> str:
     lines = text.splitlines(keepends=True)
@@ -431,11 +451,18 @@ def _merge_ignore_file(path: Path, entries: tuple[str, ...]) -> bool:
 def _emit_claude(project_dir: Path, *, force: bool) -> dict[str, bool]:
     results: dict[str, bool] = {}
     claude_dir = project_dir / ".claude"
+    hooks_dir = claude_dir / "hooks"
+    # Emit both interpreters (like Cursor/Hermes) so cross-OS local testing works;
+    # settings.json still wires only the OS-native script.
+    results[".claude/hooks/ownlock-shield.sh"] = _write_script(
+        hooks_dir / "ownlock-shield.sh", _HOOK_SCRIPT, force=force
+    )
+    results[".claude/hooks/ownlock-shield.ps1"] = _write_script(
+        hooks_dir / "ownlock-shield.ps1", _HOOK_SCRIPT_PS1, force=force
+    )
     hook_name = _claude_hook_basename()
-    hook_path = claude_dir / "hooks" / hook_name
+    hook_path = hooks_dir / hook_name
     settings_path = claude_dir / "settings.json"
-    rel_key = f".claude/hooks/{hook_name}"
-    results[rel_key] = _write_script(hook_path, _claude_hook_body(), force=force)
 
     settings: dict = {}
     if settings_path.exists():
@@ -722,6 +749,15 @@ def install_shield(
     results.update(_emit_cursor(project_dir, force=force))
     results.update(_emit_hermes(project_dir, force=force, hermes_home=hermes_home))
     results.update(_emit_pi(project_dir, force=force))
+
+    # Hook scripts changed → previous selftest results may be stale.
+    marker = project_dir / ".ownlock" / "selftest.json"
+    if marker.exists():
+        try:
+            marker.unlink()
+            results[".ownlock/selftest.json"] = True
+        except OSError:
+            results[".ownlock/selftest.json"] = False
     return results
 
 
