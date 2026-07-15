@@ -157,6 +157,20 @@ class TestSyncGhCli:
         assert result.exit_code == 1
         assert "Aborted" in result.output
 
+    def test_push_respects_confirm_policy(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        db = tmp_path / ".ownlock" / "vault.db"
+        with VaultManager(db, PASSPHRASE) as vm:
+            vm.set("LOCKED", "secretvalue99", policy="confirm")
+        monkeypatch.setattr("ownlock.ghsync.find_gh", lambda: "gh")
+        monkeypatch.setattr("ownlock.ghsync.check_authenticated", lambda gh: None)
+        # Non-TTY CliRunner cannot satisfy confirm → deny before push.
+        result = runner.invoke(
+            app, ["sync", "gh", "push", "LOCKED", "--project", "--yes"]
+        )
+        assert result.exit_code == 1
+        assert "Access denied" in result.output or "policy" in result.output.lower()
+
     def test_push_fails_cleanly_without_gh(self, project_vault, monkeypatch):
         monkeypatch.setattr("ownlock.ghsync.find_gh", lambda: None)
         result = runner.invoke(

@@ -2341,14 +2341,35 @@ def sync_gh_push(
     vault_path = _resolve_vault_path(global_vault=global_vault, project=project)
     values: dict[str, str] = {}
     missing: list[str] = []
+    denied: list[str] = []
     with passphrase_session() as passphrase:
         with VaultManager(vault_path, passphrase) as vm:
             for name in names:
+                pol = vm.get_policy(name, env)
+                try:
+                    allowed = check_policy_access(
+                        name,
+                        env,
+                        pol,
+                        is_tty=_is_tty(),
+                        reason="sync to GitHub Actions",
+                    )
+                except PermissionError:
+                    denied.append(name)
+                    continue
+                if not allowed:
+                    denied.append(name)
+                    continue
                 value = vm.get(name, env)
                 if value is None:
                     missing.append(name)
                 else:
                     values[name] = value
+    if denied:
+        console.print(
+            f"[red]Access denied (policy) for: {', '.join(denied)} — nothing pushed.[/red]"
+        )
+        raise typer.Exit(1)
     if missing:
         console.print(
             f"[red]Not in vault (env={env}): {', '.join(missing)} — nothing pushed.[/red]"

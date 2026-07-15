@@ -137,6 +137,61 @@ class TestCursorWithoutJq:
         assert code == 2
         assert json.loads(out)["permission"] == "deny"
 
+    def test_denies_shell_cat_env_without_jq(self, shielded_project, stub_path):
+        code, out = self._run(
+            shielded_project, json.dumps({"command": "cat .env"}), stub_path
+        )
+        assert code == 2
+        assert json.loads(out)["permission"] == "deny"
+
+
+@needs_bash
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only PATH stub")
+class TestClaudeWithoutJq:
+    """Claude bash hook must deny when jq is missing (not silently allow)."""
+
+    @pytest.fixture()
+    def stub_path(self, tmp_path: Path) -> str:
+        stub = tmp_path / "stub-bin"
+        stub.mkdir()
+        for tool in ("cat", "grep", "printf", "sh", "bash", "env"):
+            import shutil as _shutil
+
+            src = _shutil.which(tool)
+            if src:
+                (stub / tool).symlink_to(src)
+        return str(stub)
+
+    def _run(self, project: Path, payload: str, stub_path: str) -> tuple[int, str]:
+        script = _script(project, "claude", ".sh")
+        proc = subprocess.run(
+            [BASH, str(script)],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            env={**os.environ, "PATH": stub_path},
+            timeout=60,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8")
+
+    def test_denies_env_read(self, shielded_project, stub_path):
+        code, out = self._run(
+            shielded_project,
+            json.dumps({"tool_name": "Read", "tool_input": {"file_path": ".env"}}),
+            stub_path,
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_allows_foo_env(self, shielded_project, stub_path):
+        code, out = self._run(
+            shielded_project,
+            json.dumps({"tool_name": "Read", "tool_input": {"file_path": "foo.env"}}),
+            stub_path,
+        )
+        assert code == 0
+        assert "deny" not in out.lower() or "permissionDecision" not in out
+
 
 @needs_bash
 @pytest.mark.skipif(os.name == "nt", reason="bash guard hook is POSIX-only")
