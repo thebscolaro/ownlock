@@ -7,8 +7,9 @@
 #   brew tap thebscolaro/ownlock
 #   brew install ownlock
 #
-# Points at the latest *published* PyPI release (0.3.1). Bump url/sha/version
-# when cutting the next release.
+# Points at the latest *published* PyPI release (0.3.1 until 0.3.2 sdist lands).
+# Bump url/sha/version after PyPI publish — see packaging/README.md.
+# Cursor shield on 0.3.1 can lock the agent: upgrade to 0.3.2 and `ownlock shield --force`.
 
 class Ownlock < Formula
   include Language::Python::Virtualenv
