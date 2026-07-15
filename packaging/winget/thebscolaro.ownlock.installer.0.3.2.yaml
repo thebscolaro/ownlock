@@ -12,7 +12,7 @@ ReleaseDate: 2026-07-15
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/thebscolaro/ownlock/releases/download/v0.3.2/ownlock-windows-x64.exe
-    InstallerSha256: REPLACE_AFTER_BINARY_RELEASE
+    InstallerSha256: 514674A390EB2183834082C8E9E90F9404B75504B7A8304CF39D37AAE38CD851
     UpgradeBehavior: install
 ManifestType: installer
 ManifestVersion: 1.6.0
